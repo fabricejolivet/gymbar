@@ -170,7 +170,8 @@ export function LiveTrainingPage() {
       velocity_cms[1],
       adjustedTilt,
       targetTilt,
-      now
+      now,
+      zuptActive
     );
 
     if (rep) {
