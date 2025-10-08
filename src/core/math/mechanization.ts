@@ -15,6 +15,27 @@
  * - Euler angles: Z-Y-X convention (Yaw-Pitch-Roll)
  */
 
+/**
+ * Leveling offsets for roll and pitch
+ * Set during first long ZUPT to remove steady gravity leak from imperfect leveling
+ */
+let rollOffset = 0;
+let pitchOffset = 0;
+
+export function setLevelOffsets(roll_rad: number, pitch_rad: number): void {
+  rollOffset = roll_rad;
+  pitchOffset = pitch_rad;
+}
+
+export function getLevelOffsets(): [number, number] {
+  return [rollOffset, pitchOffset];
+}
+
+export function resetLevelOffsets(): void {
+  rollOffset = 0;
+  pitchOffset = 0;
+}
+
 export type Imu20 = {
   t: number;  // timestamp in milliseconds
   accel_ms2: [number, number, number];  // body frame, includes gravity
@@ -114,7 +135,10 @@ export function initMechanization(cutoffHz: number = 3.5): void {
  * @returns 3x3 rotation matrix R_ENU_body
  */
 function eulerToRotationMatrix(euler_rad: [number, number, number]): number[][] {
-  const [roll, pitch, yaw] = euler_rad;
+  // Apply leveling offsets (yaw unchanged)
+  const roll = euler_rad[0] - rollOffset;
+  const pitch = euler_rad[1] - pitchOffset;
+  const yaw = euler_rad[2];
 
   const cr = Math.cos(roll);
   const sr = Math.sin(roll);

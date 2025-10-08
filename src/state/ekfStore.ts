@@ -13,6 +13,7 @@ import {
   ekfInit,
   ekfPredict,
   ekfZuptUpdate,
+  ekfZaruUpdate,
   ekfPlanarUpdate,
   ekfLineVerticalUpdate,
   DEFAULT_EKF_PARAMS,
@@ -23,7 +24,9 @@ import {
   bodyToEnuAccelEuler,
   toImu20,
   initMechanization,
-  resetMechanization
+  resetMechanization,
+  setLevelOffsets,
+  resetLevelOffsets
 } from '../core/math/mechanization';
 import { ZuptDetector, DEFAULT_ZUPT_PARAMS, type ZuptParams } from '../core/math/zupt';
 import { type ConstraintConfig } from '../core/math/constraints';
@@ -45,6 +48,13 @@ interface EKFStoreState {
   initStatus: 'uninitialized' | 'waiting' | 'initialized';
   anchorXY: [number, number];
   positionOffset: [number, number, number];
+
+  // Leveling calibration
+  levelingCalibrated: boolean;
+  firstZuptStartTime: number | null;
+  levelingRollSum: number;
+  levelingPitchSum: number;
+  levelingSampleCount: number;
 
   // Status
   zuptActive: boolean;
@@ -115,6 +125,13 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
     anchorXY: [0, 0],
     positionOffset: [0, 0, 0],
 
+    // Leveling calibration
+    levelingCalibrated: false,
+    firstZuptStartTime: null,
+    levelingRollSum: 0,
+    levelingPitchSum: 0,
+    levelingSampleCount: 0,
+
     // Status
     zuptActive: false,
     lastTimestamp: null,
@@ -131,6 +148,7 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
 
     reset: () => {
       resetMechanization();
+      resetLevelOffsets();
       useStreamStore.getState().clearBuffer();
       get().zuptDetector.reset();
 
@@ -140,6 +158,11 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         initStatus: 'uninitialized',
         anchorXY: [0, 0],
         positionOffset: [0, 0, 0],
+        levelingCalibrated: false,
+        firstZuptStartTime: null,
+        levelingRollSum: 0,
+        levelingPitchSum: 0,
+        levelingSampleCount: 0,
         zuptActive: false,
         lastTimestamp: null,
         loopHz: 0,
@@ -246,11 +269,12 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         return;
       }
 
-      // Compute dt
-      const dt = (t - lastTimestamp) / 1000;
+      // Compute dt with clamping for stability
+      let dt = (t - lastTimestamp) / 1000;
+      dt = Math.max(1e-4, Math.min(dt, 0.25));  // Clamp dt to [0.1ms, 250ms]
 
       // Sanity check dt
-      if (dt <= 0 || dt > 0.2) {
+      if (dt <= 0) {
         console.warn('[ESKF] Skipping sample - invalid dt:', dt);
         set({ lastTimestamp: t });
         return;
@@ -276,38 +300,74 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         buffer
       );
 
-      if (zuptActive) {
-        const vBefore = Math.sqrt(
-          newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
-        );
+      // Leveling calibration: compute mean roll/pitch during first long ZUPT
+      const {
+        levelingCalibrated,
+        firstZuptStartTime,
+        levelingRollSum,
+        levelingPitchSum,
+        levelingSampleCount
+      } = get();
 
-        newState = ekfZuptUpdate(newState, ekfParams);
-
-        // CRITICAL FIX: Force velocity to exactly zero during ZUPT
-        // The Kalman update may leave residual velocity due to filter lag.
-        // Enforcing zero prevents drift.
-        newState.x[3] = 0;
-        newState.x[4] = 0;
-        newState.x[5] = 0;
-
-        // CRITICAL: Also zero velocity covariance to prevent drift
-        // Indices 3,4,5 are velocity components in the 9x9 covariance matrix
-        for (let i = 3; i < 6; i++) {
-          for (let j = 0; j < 9; j++) {
-            newState.P[i * 9 + j] = 0;
-            newState.P[j * 9 + i] = 0;
-          }
+      if (zuptActive && !levelingCalibrated) {
+        const now = Date.now();
+        if (firstZuptStartTime === null) {
+          // Start of first ZUPT
+          set({ firstZuptStartTime: now });
         }
 
-        const vAfter = Math.sqrt(
-          newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
-        );
+        const zuptDuration = now - (firstZuptStartTime || now);
+        const newRollSum = levelingRollSum + imu.euler_rad[0];
+        const newPitchSum = levelingPitchSum + imu.euler_rad[1];
+        const newCount = levelingSampleCount + 1;
+
+        set({
+          levelingRollSum: newRollSum,
+          levelingPitchSum: newPitchSum,
+          levelingSampleCount: newCount
+        });
+
+        // After 0.8 seconds of continuous ZUPT, compute leveling offsets
+        if (zuptDuration >= 800 && newCount > 10) {
+          const meanRoll = newRollSum / newCount;
+          const meanPitch = newPitchSum / newCount;
+          setLevelOffsets(meanRoll, meanPitch);
+          set({ levelingCalibrated: true });
+          console.log(
+            '[ESKF] Leveling calibrated - Roll offset:',
+            (meanRoll * 180 / Math.PI).toFixed(2), '°, Pitch offset:',
+            (meanPitch * 180 / Math.PI).toFixed(2), '°'
+          );
+        }
+      } else if (!zuptActive && firstZuptStartTime !== null) {
+        // Reset leveling accumulation if ZUPT ends before calibration
+        if (!levelingCalibrated) {
+          set({
+            firstZuptStartTime: null,
+            levelingRollSum: 0,
+            levelingPitchSum: 0,
+            levelingSampleCount: 0
+          });
+        }
+      }
+
+      // ZUPT and ZARU updates
+      if (zuptActive) {
+        // Apply ZUPT (velocity → 0)
+        newState = ekfZuptUpdate(newState, ekfParams);
+
+        // Apply ZARU (bias → a_enu for fast drift elimination)
+        newState = ekfZaruUpdate(newState, a_enu, ekfParams);
 
         if ((Date.now() % 5000) < 50) { // Log less frequently
+          const v_mag = Math.sqrt(
+            newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
+          );
+          const bias_z = newState.x[8];
           console.log(
-            '[ESKF] ZUPT applied - v:',
-            (vBefore * 100).toFixed(1), '→',
-            (vAfter * 100).toFixed(1), 'cm/s'
+            '[ESKF] ZUPT+ZARU - v:',
+            (v_mag * 100).toFixed(1), 'cm/s, bias_z:',
+            (bias_z * 1000).toFixed(1), 'mm/s²'
           );
         }
 

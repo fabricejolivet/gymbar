@@ -43,8 +43,10 @@ const AVAILABLE_CHANNELS: DataChannel[] = [
   { id: 'bias_y', label: 'Accel Bias Y', category: 'ekf', type: 'scalar', unit: 'm/s²', color: '#3b82f6' },
   { id: 'bias_z', label: 'Accel Bias Z', category: 'ekf', type: 'scalar', unit: 'm/s²', color: '#10b981' },
 
-  // ZUPT data
+  // ZUPT/ZARU diagnostics
   { id: 'zupt_active', label: 'ZUPT Active', category: 'zupt', type: 'boolean', unit: '', color: '#10b981' },
+  { id: 'mean_a_enu_z', label: 'Mean ENU Accel Z (1s)', category: 'zupt', type: 'scalar', unit: 'm/s²', color: '#f59e0b' },
+  { id: 'residual_z', label: 'Residual Z (a_enu - bias)', category: 'zupt', type: 'scalar', unit: 'm/s²', color: '#ec4899' },
 
   // Metrics
   { id: 'loop_hz', label: 'Loop Rate', category: 'metrics', type: 'scalar', unit: 'Hz', color: '#8b5cf6' },
@@ -142,6 +144,19 @@ export function DebugDataViewer() {
 
       // ZUPT
       dataPoint.zupt_active = ekfStore.zuptActive ? 1 : 0;
+
+      // ZARU diagnostics
+      if (buffer.length > 0 && ekfStore.isInitialized) {
+        const latest = buffer[buffer.length - 1];
+
+        // Mean ENU accel Z over last 1 second (20 samples at 20 Hz)
+        const window1s = buffer.slice(-20);
+        const meanAenuZ = window1s.reduce((sum, s) => sum + s.a_enu[2], 0) / window1s.length;
+        dataPoint.mean_a_enu_z = meanAenuZ;
+
+        // Residual: a_enu_z - bias_z
+        dataPoint.residual_z = latest.a_enu[2] - ekfStore.state.x[8];
+      }
 
       // Metrics
       dataPoint.loop_hz = ekfStore.loopHz;

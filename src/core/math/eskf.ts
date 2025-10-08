@@ -37,6 +37,7 @@ export interface EkfParams {
   // Measurement noise
   Rv: number;     // m²/s² - ZUPT velocity measurement noise
   Ry: number;     // m² - lateral position constraint noise
+  Ra?: number;    // (m/s²)² - ZARU accel-bias measurement noise (optional, for drift elimination)
 }
 
 /**
@@ -47,7 +48,8 @@ export const DEFAULT_EKF_PARAMS: EkfParams = {
   Qv: 5e-4,    // σ_a² acceleration noise power (m²/s⁴)
   Qba: 1e-6,   // Bias random walk (m/s²)²/s
   Rv: 2e-4,    // ZUPT measurement noise (m²/s²)
-  Ry: 5e-3     // Constraint measurement noise (m²)
+  Ry: 5e-3,    // Constraint measurement noise (m²)
+  Ra: 1e-4     // ZARU accel-bias measurement noise (m/s²)² - good for 20 Hz with LPF ~3.5-4.5 Hz
 };
 
 /**
@@ -101,6 +103,22 @@ function matTranspose9x9(A: Float64Array, result: Float64Array): void {
   for (let i = 0; i < 9; i++) {
     for (let j = 0; j < 9; j++) {
       result[j * 9 + i] = A[i * 9 + j];
+    }
+  }
+}
+
+/**
+ * Symmetrize covariance matrix to combat numerical drift
+ * P := (P + Pᵀ) / 2
+ *
+ * Call after every update to maintain PSD property
+ */
+function symmetrize9(P: Float64Array): void {
+  for (let i = 0; i < 9; i++) {
+    for (let j = i + 1; j < 9; j++) {
+      const avg = 0.5 * (P[i * 9 + j] + P[j * 9 + i]);
+      P[i * 9 + j] = avg;
+      P[j * 9 + i] = avg;
     }
   }
 }
@@ -326,6 +344,9 @@ export function ekfZuptUpdate(s: EkfState, p: EkfParams): EkfState {
   // P⁺ = term1 + term2
   matAdd9x9(term1, term2, P_new);
 
+  // Symmetrize to combat numerical drift
+  symmetrize9(P_new);
+
   return { x: x_new, P: P_new };
 }
 
@@ -395,6 +416,9 @@ export function ekfPlanarUpdate(
     }
   }
 
+  // Symmetrize to combat numerical drift
+  symmetrize9(P_new);
+
   return { x: x_new, P: P_new };
 }
 
@@ -453,6 +477,9 @@ export function ekfLineVerticalUpdate(
     }
   }
 
+  // Symmetrize X update
+  symmetrize9(P_temp);
+
   state = { x: x_new, P: P_temp };
 
   // Apply Y constraint with Joseph form
@@ -492,7 +519,142 @@ export function ekfLineVerticalUpdate(
     }
   }
 
+  // Symmetrize Y update
+  symmetrize9(P_new);
+
   return { x: x_new2, P: P_new };
+}
+
+/**
+ * ZARU (Zero-Acceleration Rate Update)
+ *
+ * Drives accelerometer bias toward measured ENU acceleration during ZUPT periods.
+ * This eliminates position drift by quickly adapting bias when the sensor is stationary.
+ *
+ * Key insight: During ZUPT, true acceleration ≈ 0, so a_enu ≈ bias error.
+ * We use this to pseudo-measure the bias directly.
+ *
+ * Measurement model:
+ *   z = a_enu (measured ENU accel during stationary period)
+ *   H = [0₃ 0₃ I₃]  (observes only bias)
+ *   y = z - H*x = a_enu - b_a  (innovation)
+ *
+ * Standard Kalman update with Joseph form for numerical stability.
+ *
+ * @param s Current state
+ * @param aENU Measured ENU acceleration [E, N, U] in m/s²
+ * @param p Parameters (uses Ra for measurement noise)
+ * @returns Updated state with corrected bias
+ */
+export function ekfZaruUpdate(
+  s: EkfState,
+  aENU: [number, number, number],
+  p: EkfParams
+): EkfState {
+  const x = new Float64Array(s.x);
+  const P = new Float64Array(s.P);
+  const R = p.Ra ?? 1e-4;  // Treat as scalar noise on each bias component
+
+  // Measurement matrix H (3x9): observes only bias [0 0 I]
+  const H = new Float64Array(27);
+  H[0 * 9 + 6] = 1;  // row 0 observes bias_x
+  H[1 * 9 + 7] = 1;  // row 1 observes bias_y
+  H[2 * 9 + 8] = 1;  // row 2 observes bias_z
+
+  // Innovation: y = z - H*x = a_enu - b_a
+  const y = new Float64Array([
+    aENU[0] - x[6],
+    aENU[1] - x[7],
+    aENU[2] - x[8]
+  ]);
+
+  // S = H*P*Hᵀ + R (3x3)
+  // H*P*Hᵀ extracts the bias covariance block P[6:9, 6:9]
+  const S = new Float64Array(9);
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      S[i * 3 + j] = P[(i + 6) * 9 + (j + 6)];
+    }
+    S[i * 3 + i] += R;  // Add measurement noise on diagonal
+  }
+
+  // Invert S
+  const Sinv = invert3x3(S);
+
+  // Kalman gain K = P*Hᵀ*S⁻¹ (9x3)
+  // Hᵀ extracts columns 6:9 of P
+  const K = new Float64Array(27);
+  for (let i = 0; i < 9; i++) {
+    for (let j = 0; j < 3; j++) {
+      let sum = 0;
+      for (let k = 0; k < 3; k++) {
+        sum += P[i * 9 + (k + 6)] * Sinv[k * 3 + j];
+      }
+      K[i * 3 + j] = sum;
+    }
+  }
+
+  // State update: x⁺ = x + K*y
+  for (let i = 0; i < 9; i++) {
+    let sum = 0;
+    for (let j = 0; j < 3; j++) {
+      sum += K[i * 3 + j] * y[j];
+    }
+    x[i] += sum;
+  }
+
+  // Covariance update: Joseph form for numerical stability
+  // P⁺ = (I - K*H)*P*(I - K*H)ᵀ + K*R*Kᵀ
+
+  const I = new Float64Array(81);
+  for (let i = 0; i < 9; i++) I[i * 9 + i] = 1;
+
+  // K*H (9x9)
+  const KH = new Float64Array(81);
+  for (let i = 0; i < 9; i++) {
+    for (let j = 0; j < 9; j++) {
+      let sum = 0;
+      for (let k = 0; k < 3; k++) {
+        sum += K[i * 3 + k] * H[k * 9 + j];
+      }
+      KH[i * 9 + j] = sum;
+    }
+  }
+
+  // I - K*H
+  const IKH = new Float64Array(81);
+  for (let i = 0; i < 81; i++) {
+    IKH[i] = I[i] - KH[i];
+  }
+
+  // Term1 = (I - K*H) * P * (I - K*H)ᵀ
+  const temp = new Float64Array(81);
+  const IKHt = new Float64Array(81);
+  matTranspose9x9(IKH, IKHt);
+  matMul9x9(IKH, P, temp);
+  const term1 = new Float64Array(81);
+  matMul9x9(temp, IKHt, term1);
+
+  // Term2 = K * R * Kᵀ (R is scalar, so R*I₃)
+  const KKt = new Float64Array(81);
+  for (let i = 0; i < 9; i++) {
+    for (let j = 0; j < 9; j++) {
+      let sum = 0;
+      for (let k = 0; k < 3; k++) {
+        sum += K[i * 3 + k] * K[j * 3 + k];
+      }
+      KKt[i * 9 + j] = sum * R;
+    }
+  }
+
+  // P⁺ = term1 + term2
+  const Pn = new Float64Array(81);
+  matAdd9x9(term1, KKt, Pn);
+
+  // Symmetrize to combat numerical drift
+  symmetrize9(Pn);
+
+  return { x, P: Pn };
 }
 
 /**
