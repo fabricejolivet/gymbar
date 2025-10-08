@@ -15,29 +15,8 @@
  * - Euler angles: Z-Y-X convention (Yaw-Pitch-Roll)
  */
 
-/**
- * Leveling offsets for roll and pitch
- * Set during first long ZUPT to remove steady gravity leak from imperfect leveling
- */
-let rollOffset = 0;
-let pitchOffset = 0;
-
-export function setLevelOffsets(roll_rad: number, pitch_rad: number): void {
-  rollOffset = roll_rad;
-  pitchOffset = pitch_rad;
-}
-
-export function getLevelOffsets(): [number, number] {
-  return [rollOffset, pitchOffset];
-}
-
-export function resetLevelOffsets(): void {
-  rollOffset = 0;
-  pitchOffset = 0;
-}
-
 export type Imu20 = {
-  t: number;  // timestamp in milliseconds
+  t: number;
   accel_ms2: [number, number, number];  // body frame, includes gravity
   gyro_rads: [number, number, number];  // body frame
   euler_rad: [number, number, number];  // [roll, pitch, yaw] in Z-Y-X convention
@@ -135,10 +114,7 @@ export function initMechanization(cutoffHz: number = 3.5): void {
  * @returns 3x3 rotation matrix R_ENU_body
  */
 function eulerToRotationMatrix(euler_rad: [number, number, number]): number[][] {
-  // Apply leveling offsets (yaw unchanged)
-  const roll = euler_rad[0] - rollOffset;
-  const pitch = euler_rad[1] - pitchOffset;
-  const yaw = euler_rad[2];
+  const [roll, pitch, yaw] = euler_rad;
 
   const cr = Math.cos(roll);
   const sr = Math.sin(roll);
@@ -198,11 +174,7 @@ export function bodyToEnuAccelEuler(s: Imu20): [number, number, number] {
   // Rotate body acceleration to ENU frame
   const a_enu_with_gravity = rotateVector(R_ENU_body, s.accel_ms2);
 
-  // Remove gravity in ENU frame
-  // Accelerometer measures specific force (reaction to gravity + motion)
-  // When stationary and level, sensor reads ~+1g in its up direction
-  // After rotation to ENU: stationary sensor should read [0, 0, +g]
-  // To get true acceleration (should be zero when stationary), subtract gravity
+  // Remove gravity in ENU frame (gravity acts in -Z direction)
   const GRAVITY = 9.80665;
   const a_enu_no_gravity: [number, number, number] = [
     a_enu_with_gravity[0],
@@ -229,11 +201,11 @@ export function resetMechanization(): void {
 /**
  * Convert raw WT9011 0x61 frame data to Imu20 format
  *
- * @param timestamp_ms System timestamp in milliseconds (kept in ms for consistency)
+ * @param timestamp_ms System timestamp in milliseconds
  * @param accel_g Acceleration in g [x, y, z]
  * @param gyro_dps Gyroscope in degrees/s [x, y, z]
  * @param euler_deg Euler angles in degrees [roll, pitch, yaw]
- * @returns Imu20 sample with SI units and timestamp in ms
+ * @returns Imu20 sample with SI units
  */
 export function toImu20(
   timestamp_ms: number,
@@ -244,7 +216,7 @@ export function toImu20(
   const DEG_TO_RAD = Math.PI / 180;
 
   return {
-    t: timestamp_ms,  // Keep in milliseconds (convert to dt only when computing derivatives)
+    t: timestamp_ms / 1000, // convert to seconds
     accel_ms2: [
       accel_g[0] * 9.80665,
       accel_g[1] * 9.80665,

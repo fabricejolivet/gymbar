@@ -13,7 +13,6 @@ import {
   ekfInit,
   ekfPredict,
   ekfZuptUpdate,
-  ekfZaruUpdate,
   ekfPlanarUpdate,
   ekfLineVerticalUpdate,
   DEFAULT_EKF_PARAMS,
@@ -24,37 +23,22 @@ import {
   bodyToEnuAccelEuler,
   toImu20,
   initMechanization,
-  resetMechanization,
-  setLevelOffsets,
-  resetLevelOffsets
+  resetMechanization
 } from '../core/math/mechanization';
 import { ZuptDetector, DEFAULT_ZUPT_PARAMS, type ZuptParams } from '../core/math/zupt';
 import { type ConstraintConfig } from '../core/math/constraints';
 import { useStreamStore } from './streamStore';
-import { updateEKFParams, updateZUPTParams, updateConstraintSettings } from '../core/services/preferencesService';
 
 interface EKFStoreState {
   // State and parameters
-  state: EkfState & {
-    p: [number, number, number];
-    v: [number, number, number];
-  };
+  state: EkfState;
   ekfParams: EkfParams;
   zuptParams: ZuptParams;
   constraint: ConstraintConfig;
 
   // Initialization
   isInitialized: boolean;
-  initStatus: 'uninitialized' | 'waiting' | 'initialized';
   anchorXY: [number, number];
-  positionOffset: [number, number, number];
-
-  // Leveling calibration
-  levelingCalibrated: boolean;
-  firstZuptStartTime: number | null;
-  levelingRollSum: number;
-  levelingPitchSum: number;
-  levelingSampleCount: number;
 
   // Status
   zuptActive: boolean;
@@ -68,15 +52,13 @@ interface EKFStoreState {
 
   // Internal
   zuptDetector: ZuptDetector;
-  isLoadingPreferences: boolean;
 
   // Actions
   reset: () => void;
-  setEkfParams: (params: Partial<EkfParams>, skipSave?: boolean) => void;
-  setZuptParams: (params: Partial<ZuptParams>, skipSave?: boolean) => void;
-  setConstraint: (constraint: ConstraintConfig, skipSave?: boolean) => void;
+  setEkfParams: (params: Partial<EkfParams>) => void;
+  setZuptParams: (params: Partial<ZuptParams>) => void;
+  setConstraint: (constraint: ConstraintConfig) => void;
   setConfig: (config: Partial<EkfParams>) => void; // Alias for compatibility
-  setPositionOffset: (position: [number, number, number]) => void;
   getRelativePosition: () => [number, number, number];
   processSample: (sample: {
     accel_g: [number, number, number];
@@ -86,51 +68,22 @@ interface EKFStoreState {
   }) => void;
 }
 
-// Helper to create a state with compatibility properties
-function createStateWithGetters(ekfState: EkfState): EkfState & {
-  p: [number, number, number];
-  v: [number, number, number];
-} {
-  return {
-    ...ekfState,
-    get p(): [number, number, number] {
-      return [this.x[0], this.x[1], this.x[2]];
-    },
-    get v(): [number, number, number] {
-      return [this.x[3], this.x[4], this.x[5]];
-    }
-  };
-}
-
 export const useEKFStore = create<EKFStoreState>((set, get) => {
-  /**
-   * Fixed parameters optimized for 20Hz IMU sampling:
-   * - Mechanization cutoff: 3.5Hz removes high-frequency noise while preserving barbell dynamics
-   * - No post-EKF velocity filtering: EKF process noise provides sufficient smoothing
-   */
+  // Initialize mechanization with default cutoff
   initMechanization(3.5);
 
   const zuptDetector = new ZuptDetector(DEFAULT_ZUPT_PARAMS);
 
   return {
     // State and parameters
-    state: createStateWithGetters(ekfInit()),
+    state: ekfInit(),
     ekfParams: DEFAULT_EKF_PARAMS,
     zuptParams: DEFAULT_ZUPT_PARAMS,
     constraint: { type: 'verticalPlane', axis: 'y' },
 
     // Initialization
     isInitialized: false,
-    initStatus: 'uninitialized',
     anchorXY: [0, 0],
-    positionOffset: [0, 0, 0],
-
-    // Leveling calibration
-    levelingCalibrated: false,
-    firstZuptStartTime: null,
-    levelingRollSum: 0,
-    levelingPitchSum: 0,
-    levelingSampleCount: 0,
 
     // Status
     zuptActive: false,
@@ -144,25 +97,16 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
 
     // Internal
     zuptDetector,
-    isLoadingPreferences: false,
 
     reset: () => {
       resetMechanization();
-      resetLevelOffsets();
       useStreamStore.getState().clearBuffer();
       get().zuptDetector.reset();
 
       set({
-        state: createStateWithGetters(ekfInit()),
+        state: ekfInit(),
         isInitialized: false,
-        initStatus: 'uninitialized',
         anchorXY: [0, 0],
-        positionOffset: [0, 0, 0],
-        levelingCalibrated: false,
-        firstZuptStartTime: null,
-        levelingRollSum: 0,
-        levelingPitchSum: 0,
-        levelingSampleCount: 0,
         zuptActive: false,
         lastTimestamp: null,
         loopHz: 0,
@@ -172,32 +116,18 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
       });
     },
 
-    setPositionOffset: (position) => {
-      set({ positionOffset: position });
+    setEkfParams: (params) => {
+      set({ ekfParams: { ...get().ekfParams, ...params } });
     },
 
-    setEkfParams: (params, skipSave = false) => {
-      const newParams = { ...get().ekfParams, ...params };
-      set({ ekfParams: newParams });
-      if (!skipSave) {
-        updateEKFParams(params).catch(err => console.error('[EKFStore] Failed to save EKF params:', err));
-      }
-    },
-
-    setZuptParams: (params, skipSave = false) => {
+    setZuptParams: (params) => {
       const newParams = { ...get().zuptParams, ...params };
       get().zuptDetector.setParams(newParams);
       set({ zuptParams: newParams });
-      if (!skipSave) {
-        updateZUPTParams(params).catch(err => console.error('[EKFStore] Failed to save ZUPT params:', err));
-      }
     },
 
-    setConstraint: (constraint, skipSave = false) => {
+    setConstraint: (constraint) => {
       set({ constraint });
-      if (!skipSave) {
-        updateConstraintSettings(constraint).catch(err => console.error('[EKFStore] Failed to save constraint settings:', err));
-      }
     },
 
     setConfig: (config) => {
@@ -215,25 +145,25 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
     },
 
     processSample: (sample) => {
-      try {
-        const {
-          state,
-          ekfParams,
-          constraint,
-          lastTimestamp,
-          isInitialized,
-          zuptDetector
-        } = get();
+      const {
+        state,
+        ekfParams,
+        constraint,
+        lastTimestamp,
+        isInitialized,
+        zuptDetector
+      } = get();
 
-        // Validate sample
-        if (!sample || !sample.accel_g || !sample.gyro_dps || !sample.euler_deg) {
-          return;
-        }
+      // Validate sample
+      if (!sample || !sample.accel_g || !sample.gyro_dps || !sample.euler_deg) {
+        console.error('[ESKF] Invalid sample:', sample);
+        return;
+      }
 
-        const t = sample.timestamp_ms;
+      const t = sample.timestamp_ms;
 
-        // Convert to Imu20 format
-        const imu = toImu20(t, sample.accel_g, sample.gyro_dps, sample.euler_deg);
+      // Convert to Imu20 format
+      const imu = toImu20(t, sample.accel_g, sample.gyro_dps, sample.euler_deg);
 
       // Compute gyro and accel magnitudes for metrics
       const gyroMag = Math.sqrt(
@@ -269,29 +199,22 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         return;
       }
 
-      // Compute dt with clamping for stability
-      let dt = (t - lastTimestamp) / 1000;
-      dt = Math.max(1e-4, Math.min(dt, 0.25));  // Clamp dt to [0.1ms, 250ms]
+      // Compute dt
+      const dt = (t - lastTimestamp) / 1000;
 
       // Sanity check dt
-      if (dt <= 0) {
+      if (dt <= 0 || dt > 0.2) {
         console.warn('[ESKF] Skipping sample - invalid dt:', dt);
         set({ lastTimestamp: t });
         return;
       }
 
-      // Performance metrics with smoothing
-      const instantHz = 1 / dt;
-      const alpha = 0.1; // EMA smoothing factor
-      const currentLoopHz = get().loopHz;
-      const loopHz = currentLoopHz === 0 ? instantHz : currentLoopHz * (1 - alpha) + instantHz * alpha;
+      // Performance metrics
+      const loopHz = 1 / dt;
       const dtJitter = Math.abs(dt - 0.05); // Expected 50ms
 
       // EKF Prediction
       let newState = ekfPredict(state, dt, a_enu, ekfParams);
-
-      // NOTE: Velocity filtering removed - EKF process noise provides smoothing
-      // Post-filter was causing instability when combined with forced ZUPT resets
 
       // ZUPT Detection and Update
       const buffer = streamStore.getBuffer();
@@ -300,74 +223,22 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         buffer
       );
 
-      // Leveling calibration: compute mean roll/pitch during first long ZUPT
-      const {
-        levelingCalibrated,
-        firstZuptStartTime,
-        levelingRollSum,
-        levelingPitchSum,
-        levelingSampleCount
-      } = get();
-
-      if (zuptActive && !levelingCalibrated) {
-        const now = Date.now();
-        if (firstZuptStartTime === null) {
-          // Start of first ZUPT
-          set({ firstZuptStartTime: now });
-        }
-
-        const zuptDuration = now - (firstZuptStartTime || now);
-        const newRollSum = levelingRollSum + imu.euler_rad[0];
-        const newPitchSum = levelingPitchSum + imu.euler_rad[1];
-        const newCount = levelingSampleCount + 1;
-
-        set({
-          levelingRollSum: newRollSum,
-          levelingPitchSum: newPitchSum,
-          levelingSampleCount: newCount
-        });
-
-        // After 0.8 seconds of continuous ZUPT, compute leveling offsets
-        if (zuptDuration >= 800 && newCount > 10) {
-          const meanRoll = newRollSum / newCount;
-          const meanPitch = newPitchSum / newCount;
-          setLevelOffsets(meanRoll, meanPitch);
-          set({ levelingCalibrated: true });
-          console.log(
-            '[ESKF] Leveling calibrated - Roll offset:',
-            (meanRoll * 180 / Math.PI).toFixed(2), '°, Pitch offset:',
-            (meanPitch * 180 / Math.PI).toFixed(2), '°'
-          );
-        }
-      } else if (!zuptActive && firstZuptStartTime !== null) {
-        // Reset leveling accumulation if ZUPT ends before calibration
-        if (!levelingCalibrated) {
-          set({
-            firstZuptStartTime: null,
-            levelingRollSum: 0,
-            levelingPitchSum: 0,
-            levelingSampleCount: 0
-          });
-        }
-      }
-
-      // ZUPT and ZARU updates
       if (zuptActive) {
-        // Apply ZUPT (velocity → 0)
+        const vBefore = Math.sqrt(
+          newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
+        );
+
         newState = ekfZuptUpdate(newState, ekfParams);
 
-        // Apply ZARU (bias → a_enu for fast drift elimination)
-        newState = ekfZaruUpdate(newState, a_enu, ekfParams);
+        const vAfter = Math.sqrt(
+          newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
+        );
 
-        if ((Date.now() % 5000) < 50) { // Log less frequently
-          const v_mag = Math.sqrt(
-            newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
-          );
-          const bias_z = newState.x[8];
+        if ((Date.now() % 1000) < 100) { // Log occasionally
           console.log(
-            '[ESKF] ZUPT+ZARU - v:',
-            (v_mag * 100).toFixed(1), 'cm/s, bias_z:',
-            (bias_z * 1000).toFixed(1), 'mm/s²'
+            '[ESKF] ZUPT applied - v:',
+            (vBefore * 100).toFixed(1), '→',
+            (vAfter * 100).toFixed(1), 'cm/s'
           );
         }
 
@@ -408,49 +279,18 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         (window as any).__updateSensorDebug(imu.gyro_rads, a_enu);
       }
 
-      // Determine init status
-      let newInitStatus = get().initStatus;
-      if (!isInitialized && !zuptActive) {
-        newInitStatus = 'waiting';
-      } else if (isInitialized) {
-        newInitStatus = 'initialized';
-      }
-
       set({
-        state: createStateWithGetters(newState),
+        state: newState,
         zuptActive,
         lastTimestamp: t,
         loopHz,
         dtJitter,
         gyroMagnitude: gyroMag,
-        accelMagnitude: accelMag,
-        initStatus: newInitStatus
+        accelMagnitude: accelMag
       });
-      } catch (err) {
-        console.error('[EKFStore] Error in processSample:', err);
-      }
     }
   };
 });
-
-// Load preferences on app startup
-export async function initEKFStoreFromPreferences() {
-  try {
-    const { loadUserPreferences } = await import('../core/services/preferencesService');
-    const prefs = await loadUserPreferences();
-
-    const store = useEKFStore.getState();
-
-    // Load preferences without triggering save
-    store.setEkfParams(prefs.ekf_params, true);
-    store.setZuptParams(prefs.zupt_params, true);
-    store.setConstraint(prefs.constraint_settings, true);
-
-    console.log('[EKFStore] Loaded preferences from database:', prefs);
-  } catch (err) {
-    console.error('[EKFStore] Failed to load preferences:', err);
-  }
-}
 
 // Export types for compatibility
 export type { EkfState as EKFState, EkfParams as EKFConfig };

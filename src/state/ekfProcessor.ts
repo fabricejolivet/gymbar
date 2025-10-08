@@ -8,7 +8,10 @@ type RawSample = {
 };
 
 class EKFProcessor {
+  private sampleBuffer: RawSample[] = [];
   private isProcessing = false;
+  private processingInterval: NodeJS.Timeout | null = null;
+  private maxBufferSize = 100;
 
   start() {
     if (this.isProcessing) {
@@ -16,8 +19,13 @@ class EKFProcessor {
       return;
     }
 
-    console.log('[EKFProcessor] Starting immediate EKF processing');
+    console.log('[EKFProcessor] Starting background EKF processing thread');
     this.isProcessing = true;
+    this.sampleBuffer = [];
+
+    this.processingInterval = setInterval(() => {
+      this.processBufferedSamples();
+    }, 20);
   }
 
   stop() {
@@ -25,25 +33,40 @@ class EKFProcessor {
       return;
     }
 
-    console.log('[EKFProcessor] Stopping EKF processing');
+    console.log('[EKFProcessor] Stopping background EKF processing thread');
+    if (this.processingInterval) {
+      clearInterval(this.processingInterval);
+      this.processingInterval = null;
+    }
     this.isProcessing = false;
+    this.sampleBuffer = [];
   }
 
   addSample(sample: RawSample) {
     if (!this.isProcessing) return;
 
-    try {
-      const ekfStore = useEKFStore.getState();
+    this.sampleBuffer.push(sample);
 
-      if (!ekfStore || !ekfStore.processSample) {
-        console.warn('[EKFProcessor] EKF store not ready');
-        return;
-      }
-
-      ekfStore.processSample(sample);
-    } catch (err) {
-      console.error('[EKFProcessor] Error processing sample:', err);
+    if (this.sampleBuffer.length > this.maxBufferSize) {
+      this.sampleBuffer.shift();
     }
+  }
+
+  private processBufferedSamples() {
+    if (this.sampleBuffer.length === 0) return;
+
+    const samplesToProcess = [...this.sampleBuffer];
+    this.sampleBuffer = [];
+
+    const ekfStore = useEKFStore.getState();
+
+    samplesToProcess.forEach(sample => {
+      try {
+        ekfStore.processSample(sample);
+      } catch (err) {
+        console.error('[EKFProcessor] Error processing sample:', err);
+      }
+    });
   }
 
   isRunning(): boolean {
@@ -51,7 +74,7 @@ class EKFProcessor {
   }
 
   getBufferSize(): number {
-    return 0;
+    return this.sampleBuffer.length;
   }
 }
 

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import { RotateCcw } from 'lucide-react';
 import { useEKFStore } from '../../state/ekfStore';
 
 export function DisplacementGraph() {
@@ -27,23 +26,9 @@ export function DisplacementGraph() {
     return () => clearInterval(interval);
   }, [getRelativePosition, startTime]);
 
-  const handleReset = () => {
-    setHistory([]);
-    useEKFStore.getState().reset();
-  };
-
   return (
     <div className="bg-gym-card border border-gym-border rounded-2xl p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-bold text-white">Displacement Debug</h2>
-        <button
-          onClick={handleReset}
-          className="px-3 py-1.5 text-sm bg-gym-accent text-gym-bg rounded-lg font-bold hover:opacity-80 transition-opacity flex items-center gap-1.5"
-        >
-          <RotateCcw size={14} />
-          Reset
-        </button>
-      </div>
+      <h2 className="text-lg font-bold text-white mb-4">Displacement Debug</h2>
 
       <div className="space-y-2 text-sm mb-4">
         <div className="flex justify-between">

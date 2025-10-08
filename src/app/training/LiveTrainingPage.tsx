@@ -7,17 +7,13 @@ import { useSessionStore } from '../../state/sessionStore';
 import { useEKFStore } from '../../state/ekfStore';
 import { dataRouter } from '../../state/dataRouter';
 import { BarbellRepDetector } from '../../core/reps/barbell';
-import { loadUserPreferences } from '../../core/services/preferencesService';
-import { DebugDataViewer } from '../../components/debug/DebugDataViewer';
 
 export function LiveTrainingPage() {
   const navigate = useNavigate();
-  const { currentReps, targetTilt, addRep, sensorFlipped } = useTrainingStore();
-  const { getCurrentExercise } = useSessionStore();
-  const ekfState = useEKFStore(state => state.state);
-  const initStatus = useEKFStore(state => state.initStatus);
-  const setPositionOffset = useEKFStore(state => state.setPositionOffset);
-  const resetEKF = useEKFStore(state => state.reset);
+  const { client } = useBTStore();
+  const { currentReps, targetTilt, addRep, sensorFlipped, toggleSensorFlip } = useTrainingStore();
+  const { getCurrentExercise, nextExercise: nextExerciseInSession, exercises, currentExerciseIndex } = useSessionStore();
+  const { state: ekfState, initStatus, processSample, reset: resetEKF, zuptActive, setPositionOffset } = useEKFStore();
 
   const currentExercise = getCurrentExercise();
 
@@ -27,6 +23,7 @@ export function LiveTrainingPage() {
   }
 
   const MAX_ANGLE = parseFloat(localStorage.getItem('maxAngle') || '25');
+  const HISTORY_SIZE = 100;
 
   const [timeElapsed, setTimeElapsed] = useState(0);
   const [currentTilt, setCurrentTilt] = useState(0);
@@ -39,20 +36,12 @@ export function LiveTrainingPage() {
   const [barPath, setBarPath] = useState<Array<{ x: number; y: number }>>([]);
   const [tiltPath, setTiltPath] = useState<Array<{ x: number; y: number }>>([]);
 
-  const repDetectorRef = useRef(new BarbellRepDetector());
+  const repDetectorRef = useRef(new BarbellRepDetector(30));
   const startTimeRef = useRef(Date.now());
   const lastEulerRef = useRef<[number, number, number]>([0, 0, 0]);
-  const lastUIUpdateRef = useRef(0);
 
   useEffect(() => {
     console.log('[LiveTraining] Page mounted, EKF init status:', initStatus);
-
-    loadUserPreferences().then(prefs => {
-      if (prefs.rep_counter_config) {
-        repDetectorRef.current.setConfig(prefs.rep_counter_config);
-      }
-    });
-
     repDetectorRef.current.reset();
     startTimeRef.current = Date.now();
     setTimeElapsed(0);
@@ -82,6 +71,7 @@ export function LiveTrainingPage() {
       timestamp_ms: number;
     }) => {
       lastEulerRef.current = sample.euler_deg;
+      processSample(sample);
     };
 
     const unsubscribe = dataRouter.subscribe(handleSample);
@@ -90,18 +80,12 @@ export function LiveTrainingPage() {
       console.log('[LiveTraining] Unsubscribing from data router');
       unsubscribe();
     };
-  }, []);
+  }, [processSample]);
 
   useEffect(() => {
     if (initStatus !== 'initialized') {
       return;
     }
-
-    const now = Date.now();
-    if (now - lastUIUpdateRef.current < 50) {
-      return;
-    }
-    lastUIUpdateRef.current = now;
 
     const velocity_cms: [number, number, number] = [
       ekfState.v[0] * 100,
@@ -150,8 +134,8 @@ export function LiveTrainingPage() {
     const verticalSpeed = velocity_cms[2];
     setSpeed(Math.round(Math.abs(verticalSpeed)));
 
-    setBalanceHistory(prev => [...prev.slice(-99), currentBalance]);
-    setSpeedHistory(prev => [...prev.slice(-99), Math.abs(verticalSpeed)]);
+    setBalanceHistory(prev => [...prev.slice(-(HISTORY_SIZE - 1)), currentBalance]);
+    setSpeedHistory(prev => [...prev.slice(-(HISTORY_SIZE - 1)), Math.abs(verticalSpeed)]);
 
     setBarPath(prev => {
       const newPath = [...prev, { x: position_cm[0], y: position_cm[1] }];
@@ -166,11 +150,9 @@ export function LiveTrainingPage() {
     const rep = repDetectorRef.current.update(
       position_cm[2],
       velocity_cms[2],
-      position_cm[1],
-      velocity_cms[1],
       adjustedTilt,
       targetTilt,
-      now
+      Date.now()
     );
 
     if (rep) {
@@ -189,131 +171,157 @@ export function LiveTrainingPage() {
 
   return (
     <div className="min-h-screen bg-gym-bg pb-24">
-      <div className="max-w-md mx-auto px-4 pt-8">
-        <div className="flex flex-col items-center mb-6">
-          <CircularProgress
-            timeElapsed={formatTime(timeElapsed)}
-            repCount={currentReps}
-          />
+      <div className="max-w-md mx-auto px-4 pt-4">
+        <div className="bg-gym-card border border-gym-border rounded-2xl p-4 mb-3">
+          <div className="flex justify-between items-center text-xs mb-1">
+            <span className="text-gray-400">Exercise {currentExerciseIndex + 1} of {exercises.length}</span>
+            <span className="text-gray-400">Target: {currentExercise.targetReps}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="text-xl font-bold text-gym-accent capitalize">{currentExercise.exercise}</div>
+              <div className="text-lg text-white">{currentExercise.weight}kg</div>
+            </div>
+            <div className="flex flex-col items-end">
+              <div className="text-3xl font-bold text-white">{currentReps}</div>
+              <div className="text-xs text-gray-400">{formatTime(timeElapsed)}</div>
+            </div>
+          </div>
         </div>
 
-        <div className="flex items-center justify-between mb-4 px-2">
-          <span className="text-sm text-gray-400">Left</span>
-          <span className="text-white font-bold">{currentTilt >= 0 ? '+' : ''}{currentTilt.toFixed(0)}°</span>
-          <span className="text-sm text-gray-400">Right</span>
+        {initStatus === 'waiting' && (
+          <div className="bg-yellow-900/10 border border-yellow-500/30 rounded-2xl p-4 mb-4">
+            <p className="text-yellow-400/80 text-sm text-center">
+              Place bar at rest for 1.5s to initialize...
+            </p>
+          </div>
+        )}
+
+        <div className="bg-gym-card border border-gym-border rounded-2xl p-3 mb-4">
+          <div className="flex justify-between items-center text-xs">
+            <div className="flex gap-3">
+              <span className="text-gray-400">Pos: <span className="text-white font-mono">{(ekfState.p[2] * 100).toFixed(1)}cm</span></span>
+              <span className="text-gray-400">Vel: <span className="text-white font-mono">{(ekfState.v[2] * 100).toFixed(1)}cm/s</span></span>
+            </div>
+            <div className={`px-2 py-1 rounded text-xs font-bold ${zuptActive ? 'bg-gym-accent text-gym-bg' : 'bg-gym-bg text-gray-500'}`}>
+              {zuptActive ? 'ZUPT' : 'DRIFT'}
+            </div>
+          </div>
         </div>
 
-        <div className="relative h-12 bg-gym-accent rounded-full mb-6 overflow-hidden">
-          <div className="absolute left-1/2 top-0 bottom-0 w-1 bg-green-400 transform -translate-x-1/2" />
-          <div
-            className="absolute top-1/2 w-8 h-8 bg-gray-900 rounded-full shadow-lg transition-all duration-100 transform -translate-y-1/2 -translate-x-1/2"
-            style={{ left: `${Math.max(0, Math.min(100, tiltPercentage))}%` }}
-          />
+        <div className="bg-gym-card border border-gym-border rounded-2xl p-4 mb-4">
+          <div className="flex justify-between items-center mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-gray-400">Bar Level</span>
+              <button
+                onClick={toggleSensorFlip}
+                className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                  sensorFlipped
+                    ? 'bg-gym-accent text-gym-bg'
+                    : 'bg-gym-bg text-gray-400 border border-gym-border'
+                }`}
+              >
+                Flip
+              </button>
+            </div>
+            <span className="text-white font-bold text-lg">{currentTilt >= 0 ? '+' : ''}{currentTilt.toFixed(1)}°</span>
+          </div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-xs text-gray-400 w-12 text-left">-{MAX_ANGLE}°</span>
+            <div className="relative flex-1 h-10 bg-gym-bg border border-gym-border rounded-full">
+              <div className="absolute left-1/2 top-0 bottom-0 w-px bg-gray-600" />
+              <div
+                className="absolute top-1/2 w-7 h-7 bg-gym-accent rounded-full shadow-lg transform -translate-y-1/2 -translate-x-1/2 transition-all duration-100 border-2 border-white"
+                style={{ left: `${Math.max(0, Math.min(100, tiltPercentage))}%` }}
+              />
+            </div>
+            <span className="text-xs text-gray-400 w-12 text-right">+{MAX_ANGLE}°</span>
+          </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 mb-4">
-          <div className="bg-gym-card border border-gym-border rounded-2xl p-4">
-            <div className="h-16 mb-3">
+        <div className="grid grid-cols-2 gap-3 mb-3">
+          <div className="bg-gym-card border border-gym-border rounded-2xl p-3">
+            <div className="h-12 mb-2">
               <MiniSparkline data={balanceHistory} />
             </div>
             <div className="flex items-end justify-between">
-              <h3 className="text-base font-bold text-white">Balance</h3>
-              <div className="text-2xl font-bold text-white">{balance}%</div>
+              <h3 className="text-sm font-bold text-white">Balance</h3>
+              <div className="text-xl font-bold text-white">{balance}%</div>
             </div>
           </div>
 
-          <div className="bg-gym-card border border-gym-border rounded-2xl p-4">
-            <div className="h-16 mb-3">
+          <div className="bg-gym-card border border-gym-border rounded-2xl p-3">
+            <div className="h-12 mb-2">
               <MiniBars data={speedHistory} />
             </div>
             <div className="flex items-end justify-between">
-              <h3 className="text-base font-bold text-white">Speed</h3>
-              <div className="text-2xl font-bold text-white">{speed}cm/s</div>
+              <h3 className="text-sm font-bold text-white">Speed</h3>
+              <div className="text-xl font-bold text-white">{speed}cm/s</div>
             </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-3 mb-6">
+        <div className="grid grid-cols-2 gap-3 mb-3">
           <PolarTrackingPlot
-            title="Up"
-            yLabel="Down"
+            title="Left/Right vs Up/Down"
+            xLabel="L/R"
+            yLabel="Up/Down"
             data={tiltPath}
             size={160}
           />
           <PolarTrackingPlot
-            title="Front"
-            yLabel="Back"
+            title="Left/Right vs Front/Back"
+            xLabel="L/R"
+            yLabel="F/B"
             data={barPath}
             size={160}
           />
         </div>
 
-        <button
-          onClick={() => navigate('/report')}
-          className="w-full bg-gym-accent text-gym-bg font-bold text-lg py-4 rounded-2xl hover:bg-gym-accent-dark transition-all"
-        >
-          Finish
-        </button>
+        <div className="space-y-3">
+          {currentExerciseIndex < exercises.length - 1 ? (
+            <button
+              onClick={() => {
+                if (nextExerciseInSession()) {
+                  repDetectorRef.current.reset();
+                  resetEKF();
+                  navigate('/training/countdown');
+                }
+              }}
+              className="w-full bg-gym-card text-gym-accent border-2 border-gym-accent font-bold text-lg py-4 rounded-2xl hover:bg-gym-accent hover:text-gym-bg transition-all"
+            >
+              Next exercise
+            </button>
+          ) : null}
+
+          <button
+            onClick={() => navigate('/report')}
+            className="w-full bg-gym-accent text-gym-bg font-bold text-lg py-4 rounded-2xl hover:bg-gym-accent-dark transition-all"
+          >
+            Finish
+          </button>
+        </div>
       </div>
 
       <BottomNav />
-
-      {/* Debug Data Viewer - Floating button */}
-      <DebugDataViewer />
-    </div>
-  );
-}
-
-function CircularProgress({ timeElapsed, repCount }: { timeElapsed: string; repCount: number }) {
-  const size = 200;
-  const strokeWidth = 16;
-  const radius = (size - strokeWidth) / 2;
-  const circumference = 2 * Math.PI * radius;
-
-  return (
-    <div className="relative" style={{ width: size, height: size }}>
-      <svg className="transform -rotate-90" width={size} height={size}>
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          stroke="#3a3a3a"
-          strokeWidth={strokeWidth}
-          fill="none"
-        />
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={radius}
-          stroke="#D7FF37"
-          strokeWidth={strokeWidth}
-          fill="none"
-          strokeDasharray={circumference}
-          strokeDashoffset={circumference * 0.25}
-          strokeLinecap="round"
-          className="transition-all duration-300"
-        />
-      </svg>
-      <div className="absolute inset-0 flex flex-col items-center justify-center">
-        <span className="text-sm text-gray-400">{timeElapsed}</span>
-        <span className="text-5xl font-bold text-white">{repCount}</span>
-      </div>
     </div>
   );
 }
 
 function PolarTrackingPlot({
   title,
+  xLabel,
   yLabel,
   data,
   size,
 }: {
   title: string;
+  xLabel: string;
   yLabel: string;
   data: Array<{ x: number; y: number }>;
   size: number;
 }) {
-  const padding = 25;
+  const padding = 20;
   const centerX = size / 2;
   const centerY = size / 2;
   const maxRadius = size / 2 - padding;
@@ -327,34 +335,40 @@ function PolarTrackingPlot({
   const currentPoint = normalizedData[normalizedData.length - 1];
 
   return (
-    <div className="flex flex-col bg-gym-card border border-gym-border rounded-2xl overflow-hidden">
+    <div className="flex flex-col">
       <svg
         width={size}
         height={size}
-        className="bg-gym-card"
+        className="bg-gym-card rounded-lg border border-gym-border"
       >
         <circle cx={centerX} cy={centerY} r={maxRadius * 0.33} fill="none" stroke="#2a2a2a" strokeWidth="1" />
         <circle cx={centerX} cy={centerY} r={maxRadius * 0.66} fill="none" stroke="#2a2a2a" strokeWidth="1" />
         <circle cx={centerX} cy={centerY} r={maxRadius} fill="none" stroke="#2a2a2a" strokeWidth="1" />
 
-        <line x1={centerX} y1={padding} x2={centerX} y2={size - padding} stroke="#3a3a3a" strokeWidth="1.5" />
-        <line x1={padding} y1={centerY} x2={size - padding} y2={centerY} stroke="#3a3a3a" strokeWidth="1.5" />
+        <line x1={centerX} y1={padding} x2={centerX} y2={size - padding} stroke="#3a3a3a" strokeWidth="1" />
+        <line x1={padding} y1={centerY} x2={size - padding} y2={centerY} stroke="#3a3a3a" strokeWidth="1" />
 
-        <text x={centerX} y={padding - 8} fontSize="11" fill="#888" textAnchor="middle" fontWeight="600">{title}</text>
-        {yLabel && <text x={centerX} y={size - padding + 15} fontSize="10" fill="#666" textAnchor="middle">{yLabel}</text>}
+        <text x={centerX} y={padding - 5} fontSize="10" fill="#666" textAnchor="middle">{yLabel}+</text>
+        <text x={centerX} y={size - padding + 12} fontSize="10" fill="#666" textAnchor="middle">{yLabel}-</text>
+        <text x={padding - 5} y={centerY + 3} fontSize="10" fill="#666" textAnchor="end">{xLabel}-</text>
+        <text x={size - padding + 5} y={centerY + 3} fontSize="10" fill="#666" textAnchor="start">{xLabel}+</text>
+
+        <text x={centerX + maxRadius * 0.33 + 3} y={centerY - 3} fontSize="8" fill="#555" textAnchor="start">10cm</text>
+        <text x={centerX + maxRadius * 0.66 + 3} y={centerY - 3} fontSize="8" fill="#555" textAnchor="start">20cm</text>
+        <text x={centerX + maxRadius + 3} y={centerY - 3} fontSize="8" fill="#555" textAnchor="start">30cm</text>
 
         {normalizedData.length > 1 && (
           <polyline
             points={normalizedData.map(p => `${p.x},${p.y}`).join(' ')}
             fill="none"
             stroke="#D7FF37"
-            strokeWidth="2.5"
-            strokeOpacity="0.9"
+            strokeWidth="2"
+            strokeOpacity="0.8"
           />
         )}
 
         {currentPoint && (
-          <circle cx={currentPoint.x} cy={currentPoint.y} r="5" fill="#D7FF37" stroke="white" strokeWidth="2" />
+          <circle cx={currentPoint.x} cy={currentPoint.y} r="4" fill="#D7FF37" stroke="white" strokeWidth="2" />
         )}
       </svg>
     </div>
@@ -365,6 +379,9 @@ function MiniSparkline({ data }: { data: number[] }) {
   if (data.length === 0) return null;
 
   const max = Math.max(...data, 100);
+  const average = data.reduce((sum, v) => sum + v, 0) / data.length;
+  const avgY = 100 - (average / max) * 100;
+
   const points = data.map((v, i) => {
     const x = (i / (data.length - 1)) * 100;
     const y = 100 - (v / max) * 100;
@@ -373,6 +390,16 @@ function MiniSparkline({ data }: { data: number[] }) {
 
   return (
     <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+      <line
+        x1="0"
+        y1={avgY}
+        x2="100"
+        y2={avgY}
+        stroke="#888"
+        strokeWidth="1"
+        strokeDasharray="2,2"
+        vectorEffect="non-scaling-stroke"
+      />
       <polyline
         points={points}
         fill="none"
@@ -389,6 +416,8 @@ function MiniBars({ data }: { data: number[] }) {
 
   const max = Math.max(...data, 50);
   const barWidth = 100 / data.length;
+  const average = data.reduce((sum, v) => sum + v, 0) / data.length;
+  const avgY = 100 - (average / max) * 100;
 
   return (
     <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
@@ -406,6 +435,16 @@ function MiniBars({ data }: { data: number[] }) {
           />
         );
       })}
+      <line
+        x1="0"
+        y1={avgY}
+        x2="100"
+        y2={avgY}
+        stroke="#888"
+        strokeWidth="1"
+        strokeDasharray="2,2"
+        vectorEffect="non-scaling-stroke"
+      />
     </svg>
   );
 }

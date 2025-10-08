@@ -37,30 +37,26 @@ class DataRouter {
     ekfProcessor.start();
 
     const handleData = (data: Uint8Array) => {
-      try {
-        const sample = parse0x61(data);
-        if (sample) {
-          const parsedSample = {
-            accel_g: sample.accel_g,
-            gyro_dps: sample.gyro_dps,
-            euler_deg: sample.euler_deg,
-            timestamp_ms: sample.t
-          };
+      const sample = parse0x61(data);
+      if (sample) {
+        const parsedSample = {
+          accel_g: sample.accel_g,
+          gyro_dps: sample.gyro_dps,
+          euler_deg: sample.euler_deg,
+          timestamp_ms: sample.t
+        };
 
-          // Send to EKF processor (immediate processing)
-          ekfProcessor.addSample(parsedSample);
+        // Send to EKF processor (async thread)
+        ekfProcessor.addSample(parsedSample);
 
-          // Notify UI subscribers
-          this.callbacks.forEach(callback => {
-            try {
-              callback(parsedSample);
-            } catch (err) {
-              console.error('[DataRouter] Callback error:', err);
-            }
-          });
-        }
-      } catch (err) {
-        console.error('[DataRouter] Error handling data:', err);
+        // Notify UI subscribers
+        this.callbacks.forEach(callback => {
+          try {
+            callback(parsedSample);
+          } catch (err) {
+            console.error('[DataRouter] Callback error:', err);
+          }
+        });
       }
     };
 
