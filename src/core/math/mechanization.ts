@@ -16,7 +16,7 @@
  */
 
 export type Imu20 = {
-  t: number;
+  t: number;  // timestamp in milliseconds
   accel_ms2: [number, number, number];  // body frame, includes gravity
   gyro_rads: [number, number, number];  // body frame
   euler_rad: [number, number, number];  // [roll, pitch, yaw] in Z-Y-X convention
@@ -205,11 +205,11 @@ export function resetMechanization(): void {
 /**
  * Convert raw WT9011 0x61 frame data to Imu20 format
  *
- * @param timestamp_ms System timestamp in milliseconds
+ * @param timestamp_ms System timestamp in milliseconds (kept in ms for consistency)
  * @param accel_g Acceleration in g [x, y, z]
  * @param gyro_dps Gyroscope in degrees/s [x, y, z]
  * @param euler_deg Euler angles in degrees [roll, pitch, yaw]
- * @returns Imu20 sample with SI units
+ * @returns Imu20 sample with SI units and timestamp in ms
  */
 export function toImu20(
   timestamp_ms: number,
@@ -220,7 +220,7 @@ export function toImu20(
   const DEG_TO_RAD = Math.PI / 180;
 
   return {
-    t: timestamp_ms / 1000, // convert to seconds
+    t: timestamp_ms,  // Keep in milliseconds (convert to dt only when computing derivatives)
     accel_ms2: [
       accel_g[0] * 9.80665,
       accel_g[1] * 9.80665,
