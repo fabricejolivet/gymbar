@@ -10,6 +10,7 @@ import { DebugPolarPlots } from '../../components/charts/DebugPolarPlots';
 import { RepCounterTuning } from '../../components/controls/RepCounterTuning';
 import { LiveSensorStreams } from '../../components/charts/LiveSensorStreams';
 import { ZUPTDiagnostic } from '../../components/controls/ZUPTDiagnostic';
+import { DebugDataViewer } from '../../components/debug/DebugDataViewer';
 import { loadUserPreferences, updateWorkoutPreferences, updateDeviceSettings, updateRepCounterConfig, updateConstraintSettings, updateAccelCutoff } from '../../core/services/preferencesService';
 import { DEFAULT_REP_CONFIG, type RepCounterConfig } from '../../core/reps/barbell';
 import type { EkfParams } from '../../core/math/eskf';
@@ -489,6 +490,9 @@ export function SettingsPage() {
       </div>
 
       <BottomNav />
+
+      {/* Debug Data Viewer - Floating button */}
+      <DebugDataViewer />
     </div>
   );
 }

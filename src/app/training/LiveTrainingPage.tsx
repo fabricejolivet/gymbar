@@ -8,6 +8,7 @@ import { useEKFStore } from '../../state/ekfStore';
 import { dataRouter } from '../../state/dataRouter';
 import { BarbellRepDetector } from '../../core/reps/barbell';
 import { loadUserPreferences } from '../../core/services/preferencesService';
+import { DebugDataViewer } from '../../components/debug/DebugDataViewer';
 
 export function LiveTrainingPage() {
   const navigate = useNavigate();
@@ -256,6 +257,9 @@ export function LiveTrainingPage() {
       </div>
 
       <BottomNav />
+
+      {/* Debug Data Viewer - Floating button */}
+      <DebugDataViewer />
     </div>
   );
 }
