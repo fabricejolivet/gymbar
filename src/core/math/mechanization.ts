@@ -16,7 +16,7 @@
  */
 
 export type Imu20 = {
-  t: number;
+  t: number;  // timestamp in milliseconds
   accel_ms2: [number, number, number];  // body frame, includes gravity
   gyro_rads: [number, number, number];  // body frame
   euler_rad: [number, number, number];  // [roll, pitch, yaw] in Z-Y-X convention
@@ -174,7 +174,11 @@ export function bodyToEnuAccelEuler(s: Imu20): [number, number, number] {
   // Rotate body acceleration to ENU frame
   const a_enu_with_gravity = rotateVector(R_ENU_body, s.accel_ms2);
 
-  // Remove gravity in ENU frame (gravity acts in -Z direction)
+  // Remove gravity in ENU frame
+  // Accelerometer measures specific force (reaction to gravity + motion)
+  // When stationary and level, sensor reads ~+1g in its up direction
+  // After rotation to ENU: stationary sensor should read [0, 0, +g]
+  // To get true acceleration (should be zero when stationary), subtract gravity
   const GRAVITY = 9.80665;
   const a_enu_no_gravity: [number, number, number] = [
     a_enu_with_gravity[0],
@@ -201,11 +205,11 @@ export function resetMechanization(): void {
 /**
  * Convert raw WT9011 0x61 frame data to Imu20 format
  *
- * @param timestamp_ms System timestamp in milliseconds
+ * @param timestamp_ms System timestamp in milliseconds (kept in ms for consistency)
  * @param accel_g Acceleration in g [x, y, z]
  * @param gyro_dps Gyroscope in degrees/s [x, y, z]
  * @param euler_deg Euler angles in degrees [roll, pitch, yaw]
- * @returns Imu20 sample with SI units
+ * @returns Imu20 sample with SI units and timestamp in ms
  */
 export function toImu20(
   timestamp_ms: number,
@@ -216,7 +220,7 @@ export function toImu20(
   const DEG_TO_RAD = Math.PI / 180;
 
   return {
-    t: timestamp_ms / 1000, // convert to seconds
+    t: timestamp_ms,  // Keep in milliseconds (convert to dt only when computing derivatives)
     accel_ms2: [
       accel_g[0] * 9.80665,
       accel_g[1] * 9.80665,

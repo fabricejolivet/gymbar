@@ -2,24 +2,12 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BottomNav } from '../../components/layout/BottomNav';
 import { useEKFStore } from '../../state/ekfStore';
-import { dataRouter } from '../../state/dataRouter';
 
 export function CountdownPage() {
   const navigate = useNavigate();
-  const { processSample, initStatus } = useEKFStore();
+  const { initStatus } = useEKFStore();
   const [count, setCount] = useState(5);
   const [startTime] = useState(Date.now());
-
-  useEffect(() => {
-    console.log('[Countdown] Subscribing to data router for calibration');
-
-    const unsubscribe = dataRouter.subscribe(processSample);
-
-    return () => {
-      console.log('[Countdown] Unsubscribing from data router');
-      unsubscribe();
-    };
-  }, [processSample]);
 
   useEffect(() => {
     const interval = setInterval(() => {

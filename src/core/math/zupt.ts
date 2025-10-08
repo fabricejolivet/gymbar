@@ -174,19 +174,24 @@ export class ZuptDetector {
  * Evaluates if a buffer of samples represents a stationary period
  * using SHOE-style magnitude thresholding.
  *
- * @param buffer Array of recent IMU samples
+ * Uses actual timestamps to measure window duration instead of
+ * assuming fixed sample rate.
+ *
+ * @param buffer Array of recent IMU samples with timestamps
  * @param params Detection parameters
  * @returns true if all samples in buffer are below thresholds
  */
 export function detectZUPT(
-  buffer: { a_enu: [number, number, number]; gyro: [number, number, number] }[],
+  buffer: { a_enu: [number, number, number]; gyro: [number, number, number]; timestamp_ms?: number }[],
   params: ZuptParams
 ): boolean {
-  if (buffer.length === 0) return false;
+  if (buffer.length < 2) return false;
 
-  // Check duration
-  const minSamples = Math.ceil(params.minHoldMs / 50); // Assume 20 Hz = 50ms per sample
-  if (buffer.length < minSamples) return false;
+  // Check duration using timestamps if available
+  if (buffer[0].timestamp_ms !== undefined && buffer[buffer.length - 1].timestamp_ms !== undefined) {
+    const duration = buffer[buffer.length - 1].timestamp_ms! - buffer[0].timestamp_ms!;
+    if (duration < params.minHoldMs) return false;
+  }
 
   // All samples must be below thresholds
   return buffer.every(s => {
