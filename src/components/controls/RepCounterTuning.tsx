@@ -49,8 +49,7 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
           vy,
           0,
           0,
-          Date.now(),
-          zuptActive
+          Date.now()
         );
 
         if (rep) {
