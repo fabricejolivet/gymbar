@@ -3,23 +3,23 @@ import { Activity, Info, X, RotateCcw } from 'lucide-react';
 import { RepDisplacementGraph } from '../charts/RepDisplacementGraph';
 import { useEKFStore } from '../../state/ekfStore';
 import { dataRouter } from '../../state/dataRouter';
-import { BarbellRepDetector } from '../../core/reps/barbell';
-import type { RepCounterConfig } from '../../core/reps/barbell';
+import { SimpleVerticalRepDetector, type SimpleRepConfig } from '../../core/reps/simpleVerticalDetector';
 
 interface RepCounterTuningProps {
-  config: RepCounterConfig;
-  onChange: (config: Partial<RepCounterConfig>) => void;
+  config: SimpleRepConfig;
+  onChange: (config: Partial<SimpleRepConfig>) => void;
 }
 
-type RepPhase = 'idle' | 'descent' | 'ascent' | 'lockout';
+type RepPhase = 'waiting' | 'descending' | 'ascending' | 'lockout';
 
 export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
   const [displacementData, setDisplacementData] = useState<Array<{ time: number; position: number; velocity: number; phase: RepPhase }>>([]);
   const [showHelp, setShowHelp] = useState(false);
   const [showGraph, setShowGraph] = useState(false);
   const [repCount, setRepCount] = useState(0);
-  const [currentPhase, setCurrentPhase] = useState<RepPhase>('idle');
-  const repDetectorRef = useRef(new BarbellRepDetector(config));
+  const [currentPhase, setCurrentPhase] = useState<RepPhase>('waiting');
+  const [currentROM, setCurrentROM] = useState(0);
+  const repDetectorRef = useRef(new SimpleVerticalRepDetector(config));
   const lastUpdateRef = useRef(0);
 
   useEffect(() => {
@@ -29,7 +29,8 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
   const handleReset = () => {
     repDetectorRef.current.reset();
     setRepCount(0);
-    setCurrentPhase('idle');
+    setCurrentPhase('waiting');
+    setCurrentROM(0);
     setDisplacementData([]);
   };
 
@@ -37,36 +38,32 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
     const handleSample = () => {
       try {
         const ekfState = useEKFStore.getState().state;
-        const vz = ekfState.v[2] * 100;
-        const vy = ekfState.v[1] * 100;
-        const pz = ekfState.p[2] * 100;
-        const py = ekfState.p[1] * 100;
+        const vz = ekfState.v[2] * 100; // m/s to cm/s
+        const pz = ekfState.p[2] * 100; // m to cm
 
         const rep = repDetectorRef.current.update(
-          pz,
-          vz,
-          py,
-          vy,
-          0,
-          0,
-          Date.now()
+          pz,           // verticalPos_cm
+          vz,           // verticalVel_cms
+          0,            // tilt_deg (not used in settings)
+          0,            // targetTilt_deg
+          Date.now()    // time_ms
         );
 
         if (rep) {
           setRepCount(prev => prev + 1);
+          console.log('[RepCounterTuning] Rep detected:', rep);
         }
 
         const detectorState = repDetectorRef.current.getState();
         setCurrentPhase(detectorState);
+        setCurrentROM(repDetectorRef.current.getCurrentROM());
 
         if (showGraph) {
           const now = Date.now();
           if (now - lastUpdateRef.current >= 20) {
             lastUpdateRef.current = now;
-            const position = config.mode === 'vertical' ? pz : py;
-            const velocity = config.mode === 'vertical' ? vz : vy;
             setDisplacementData(prev => {
-              const newData = [...prev, { time: now, position, velocity, phase: detectorState }];
+              const newData = [...prev, { time: now, position: pz, velocity: vz, phase: detectorState }];
               return newData.slice(-300);
             });
           }
@@ -78,12 +75,12 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
 
     const unsubscribe = dataRouter.subscribe(handleSample);
     return () => unsubscribe();
-  }, [showGraph]);
+  }, [showGraph, config]);
 
   const getPhaseColor = (phase: RepPhase) => {
     switch (phase) {
-      case 'descent': return 'text-red-400';
-      case 'ascent': return 'text-blue-400';
+      case 'descending': return 'text-red-400';
+      case 'ascending': return 'text-blue-400';
       case 'lockout': return 'text-green-400';
       default: return 'text-gray-400';
     }
@@ -100,6 +97,11 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
             <span className={`text-xs font-bold uppercase ${getPhaseColor(currentPhase)}`}>
               {currentPhase}
             </span>
+            {currentROM > 0 && (
+              <span className="text-xs text-gray-400">
+                ({currentROM.toFixed(0)}cm)
+              </span>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-1">
@@ -119,27 +121,8 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 mb-3">
-        <button
-          onClick={() => onChange({ mode: 'vertical' })}
-          className={`py-2 px-3 rounded-lg text-sm font-bold transition-colors ${
-            config.mode === 'vertical'
-              ? 'bg-gym-accent text-gym-bg'
-              : 'bg-gym-bg text-gray-400 border border-gym-border'
-          }`}
-        >
-          Vertical
-        </button>
-        <button
-          onClick={() => onChange({ mode: 'horizontal' })}
-          className={`py-2 px-3 rounded-lg text-sm font-bold transition-colors ${
-            config.mode === 'horizontal'
-              ? 'bg-gym-accent text-gym-bg'
-              : 'bg-gym-bg text-gray-400 border border-gym-border'
-          }`}
-        >
-          Horizontal
-        </button>
+      <div className="bg-gym-bg rounded-lg p-2 mb-3 text-xs text-gray-400">
+        Simple vertical-only rep detector. Detects: descent → bottom → ascent → lockout → rep complete → reset
       </div>
 
       <button
@@ -158,9 +141,9 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
         <RepDisplacementGraph
           displacementData={displacementData}
           minROM={config.minROM_cm}
-          minDescent={config.minDescentChange_cm ?? 2}
-          minAscent={config.minAscentChange_cm ?? 2}
-          mode={config.mode}
+          minDescent={3}
+          minAscent={3}
+          mode="vertical"
         />
       )}
 
@@ -179,55 +162,58 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
             onChange={(e) => onChange({ minROM_cm: parseInt(e.target.value) })}
             className="w-full h-1.5 bg-gym-bg rounded-lg appearance-none cursor-pointer accent-gym-accent"
           />
+          <p className="text-xs text-gray-500 mt-1">Minimum range of motion to count rep</p>
         </div>
 
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-xs text-gray-400">Min Descent</label>
-            <span className="text-white font-mono text-xs">{config.minDescentChange_cm?.toFixed(1) ?? '2.0'} cm</span>
+            <label className="text-xs text-gray-400">Descent Velocity</label>
+            <span className="text-white font-mono text-xs">{Math.abs(config.descentVelocity_cms)} cm/s</span>
           </div>
           <input
             type="range"
             min="1"
             max="10"
             step="0.5"
-            value={config.minDescentChange_cm ?? 2}
-            onChange={(e) => onChange({ minDescentChange_cm: parseFloat(e.target.value) })}
+            value={Math.abs(config.descentVelocity_cms)}
+            onChange={(e) => onChange({ descentVelocity_cms: -parseFloat(e.target.value) })}
             className="w-full h-1.5 bg-gym-bg rounded-lg appearance-none cursor-pointer accent-gym-accent"
           />
+          <p className="text-xs text-gray-500 mt-1">Velocity threshold to start descent phase</p>
         </div>
 
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-xs text-gray-400">Min Ascent</label>
-            <span className="text-white font-mono text-xs">{config.minAscentChange_cm?.toFixed(1) ?? '2.0'} cm</span>
+            <label className="text-xs text-gray-400">Ascent Velocity</label>
+            <span className="text-white font-mono text-xs">{config.ascentVelocity_cms} cm/s</span>
           </div>
           <input
             type="range"
             min="1"
             max="10"
             step="0.5"
-            value={config.minAscentChange_cm ?? 2}
-            onChange={(e) => onChange({ minAscentChange_cm: parseFloat(e.target.value) })}
+            value={config.ascentVelocity_cms}
+            onChange={(e) => onChange({ ascentVelocity_cms: parseFloat(e.target.value) })}
             className="w-full h-1.5 bg-gym-bg rounded-lg appearance-none cursor-pointer accent-gym-accent"
           />
+          <p className="text-xs text-gray-500 mt-1">Velocity threshold to start ascent phase</p>
         </div>
 
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-xs text-gray-400">Lockout Velocity</label>
-            <span className="text-white font-mono text-xs">{config.lockoutVelocity_cms ?? 10} cm/s</span>
+            <span className="text-white font-mono text-xs">{config.lockoutVelocity_cms} cm/s</span>
           </div>
           <input
             type="range"
-            min="2"
-            max="30"
-            step="1"
-            value={config.lockoutVelocity_cms ?? 10}
-            onChange={(e) => onChange({ lockoutVelocity_cms: parseInt(e.target.value) })}
+            min="1"
+            max="10"
+            step="0.5"
+            value={config.lockoutVelocity_cms}
+            onChange={(e) => onChange({ lockoutVelocity_cms: parseFloat(e.target.value) })}
             className="w-full h-1.5 bg-gym-bg rounded-lg appearance-none cursor-pointer accent-gym-accent"
           />
-          <p className="text-xs text-gray-500 mt-1">Max velocity to trigger lockout</p>
+          <p className="text-xs text-gray-500 mt-1">Max velocity to enter lockout</p>
         </div>
 
         <div>
@@ -237,46 +223,47 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
           </div>
           <input
             type="range"
-            min="50"
+            min="100"
             max="1000"
             step="50"
             value={config.lockoutDuration_ms}
             onChange={(e) => onChange({ lockoutDuration_ms: parseInt(e.target.value) })}
             className="w-full h-1.5 bg-gym-bg rounded-lg appearance-none cursor-pointer accent-gym-accent"
           />
-          <p className="text-xs text-gray-500 mt-1">Hold time at top</p>
+          <p className="text-xs text-gray-500 mt-1">Hold time at top before completing rep</p>
         </div>
       </div>
 
       {showHelp && (
         <div className="mt-4 p-3 bg-gym-bg border border-gym-border rounded-lg space-y-2 text-xs">
           <div>
-            <span className="text-gym-accent font-bold">Mode:</span>
-            <span className="text-gray-400 ml-1">Vertical for squats/presses, Horizontal for rows</span>
+            <span className="text-gym-accent font-bold">Simple Vertical Detector:</span>
+            <span className="text-gray-400 ml-1">State machine for vertical barbell movements</span>
           </div>
           <div>
             <span className="text-gym-accent font-bold">Min ROM:</span>
             <span className="text-gray-400 ml-1">Total distance bar must travel to count as valid rep</span>
           </div>
           <div>
-            <span className="text-gym-accent font-bold">Min Descent:</span>
-            <span className="text-gray-400 ml-1">Distance bar must move down to trigger ascent phase</span>
+            <span className="text-gym-accent font-bold">Descent/Ascent Velocity:</span>
+            <span className="text-gray-400 ml-1">Velocity thresholds to trigger phase transitions</span>
           </div>
           <div>
-            <span className="text-gym-accent font-bold">Min Ascent:</span>
-            <span className="text-gray-400 ml-1">Distance bar must move up from bottom to validate rep</span>
+            <span className="text-gym-accent font-bold">Lockout Velocity:</span>
+            <span className="text-gray-400 ml-1">Max velocity allowed to enter lockout phase</span>
           </div>
           <div>
             <span className="text-gym-accent font-bold">Lockout Duration:</span>
-            <span className="text-gray-400 ml-1">Time bar must be stable at top to complete rep (position change &lt; 0.5cm, 3 samples needed)</span>
+            <span className="text-gray-400 ml-1">Time bar must be stable at top to complete rep</span>
           </div>
           <div className="pt-2 border-t border-gym-border">
             <span className="text-purple-400 font-bold">How it works:</span>
             <div className="text-gray-400 ml-1 mt-1 space-y-1">
-              <div>1. <span className="text-red-400">Descent</span>: Triggered when bar moves down &gt; Min Descent</div>
-              <div>2. <span className="text-blue-400">Ascent</span>: Triggered when bar starts moving up &gt; Min Ascent</div>
-              <div>3. <span className="text-green-400">Lockout</span>: Triggered when bar is stable (&lt; 0.5cm movement, velocity &lt; 10cm/s for 3 samples)</div>
-              <div>4. <span className="text-gym-accent">Rep Counted</span>: After holding lockout for the specified duration with ROM &gt; Min ROM</div>
+              <div>1. <span className="text-gray-400">Waiting</span>: Idle, waiting for descent</div>
+              <div>2. <span className="text-red-400">Descending</span>: Bar moving down (velocity &lt; -3 cm/s)</div>
+              <div>3. <span className="text-blue-400">Ascending</span>: Bar moving up (velocity &gt; +3 cm/s)</div>
+              <div>4. <span className="text-green-400">Lockout</span>: Bar stable at top (velocity &lt; 2 cm/s)</div>
+              <div>5. <span className="text-gym-accent">Rep Complete</span>: After lockout duration + ROM check → All filters reset!</div>
             </div>
           </div>
         </div>

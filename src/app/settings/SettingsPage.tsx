@@ -12,7 +12,7 @@ import { LiveSensorStreams } from '../../components/charts/LiveSensorStreams';
 import { ZUPTDiagnostic } from '../../components/controls/ZUPTDiagnostic';
 import { DebugDataViewer } from '../../components/debug/DebugDataViewer';
 import { loadUserPreferences, updateWorkoutPreferences, updateDeviceSettings, updateRepCounterConfig, updateConstraintSettings, updateAccelCutoff } from '../../core/services/preferencesService';
-import { DEFAULT_REP_CONFIG, type RepCounterConfig } from '../../core/reps/barbell';
+import { DEFAULT_SIMPLE_REP_CONFIG, type SimpleRepConfig } from '../../core/reps/simpleVerticalDetector';
 import type { EkfParams } from '../../core/math/eskf';
 import type { ZuptParams } from '../../core/math/zupt';
 import type { ConstraintConfig } from '../../core/math/constraints';
@@ -25,7 +25,7 @@ export function SettingsPage() {
   const [sampleRate, setSampleRate] = useState('20');
   const [restTimer, setRestTimer] = useState(true);
   const [autoCalibrate, setAutoCalibrate] = useState(true);
-  const [repConfig, setRepConfig] = useState<RepCounterConfig>(DEFAULT_REP_CONFIG);
+  const [repConfig, setRepConfig] = useState<SimpleRepConfig>(DEFAULT_SIMPLE_REP_CONFIG);
   const [constraintSettings, setConstraintSettings] = useState<ConstraintConfig>({ type: 'verticalPlane', axis: 'y' });
   const [accelCutoff, setAccelCutoff] = useState(3.5);
   const [mounted, setMounted] = useState(false);
@@ -43,7 +43,15 @@ export function SettingsPage() {
       setSampleRate(prefs.device_settings.sampleRate);
       setAutoCalibrate(prefs.device_settings.autoCalibrate);
       if (prefs.rep_counter_config) {
-        setRepConfig(prefs.rep_counter_config);
+        // Convert old config to new SimpleRepConfig if needed
+        const simpleConfig: SimpleRepConfig = {
+          minROM_cm: prefs.rep_counter_config.minROM_cm || 15,
+          descentVelocity_cms: prefs.rep_counter_config.descentVelocity_cms ?? -3,
+          ascentVelocity_cms: prefs.rep_counter_config.ascentVelocity_cms ?? 3,
+          lockoutVelocity_cms: prefs.rep_counter_config.lockoutVelocity_cms ?? 2,
+          lockoutDuration_ms: prefs.rep_counter_config.lockoutDuration_ms || 300,
+        };
+        setRepConfig(simpleConfig);
       }
       setConstraintSettings(prefs.constraint_settings);
       setAccelCutoff(prefs.accel_cutoff);
@@ -51,11 +59,11 @@ export function SettingsPage() {
     });
   }, []);
 
-  const handleRepConfigChange = (newConfig: Partial<RepCounterConfig>) => {
+  const handleRepConfigChange = (newConfig: Partial<SimpleRepConfig>) => {
     const updated = { ...repConfig, ...newConfig };
     setRepConfig(updated);
     if (mounted) {
-      updateRepCounterConfig(updated).catch(err => console.error('Failed to save rep config:', err));
+      updateRepCounterConfig(updated as any).catch(err => console.error('Failed to save rep config:', err));
     }
   };
 
