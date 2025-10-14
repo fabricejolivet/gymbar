@@ -271,12 +271,7 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
       // EKF Prediction
       let newState = ekfPredict(state, dt, a_enu, ekfParams);
 
-      // Apply lightweight velocity smoothing (EMA on vertical velocity only)
-      // This reduces jitter for rep detection while preserving responsiveness
-      const velocityFilterZ = get().velocityFilterZ;
-      newState.x[5] = velocityFilterZ.filter(newState.x[5]); // Smooth vZ only
-
-      // ZUPT Detection and Update
+      // ZUPT Detection and Update (do this FIRST, before filtering)
       const buffer = streamStore.getBuffer();
       const zuptActive = zuptDetector.detect(
         { a_enu, gyro: imu.gyro_rads, timestamp_ms: t },
@@ -325,6 +320,13 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
           set({ isInitialized: true, anchorXY });
           console.log('[ESKF] Initialized at anchor:', anchorXY);
         }
+      }
+
+      // Apply velocity smoothing AFTER ZUPT (so ZUPT doesn't corrupt filter state)
+      // Only smooth when NOT in ZUPT (preserve ZUPT's zero velocity)
+      if (!zuptActive) {
+        const velocityFilterZ = get().velocityFilterZ;
+        newState.x[5] = velocityFilterZ.filter(newState.x[5]); // Smooth vZ only
       }
 
       // Apply constraints (when initialized and not during ZUPT)
