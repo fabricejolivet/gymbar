@@ -31,21 +31,26 @@ export interface ZuptParams {
 }
 
 /**
- * Default ZUPT parameters tuned for 20 Hz sampling
+ * Default ZUPT parameters tuned for 20 Hz sampling with barbell movements
  *
  * These values are based on:
  * - Typical sensor noise levels for consumer MEMS IMUs
  * - OpenShoe recommended starting points
  * - Empirical tuning for barbell movement dynamics
+ * - IMPORTANT: Must not trigger during slow movements (lockout phase needs velocity!)
  *
  * NOTE: Consumer-grade IMUs have higher noise than industrial sensors:
  * - Accel noise: ~0.15-0.5 m/s² typical
  * - Gyro noise: ~0.1-0.3 rad/s typical
+ * - Barbell at lockout: accel ~0.1-0.3 m/s², gyro ~0.05-0.2 rad/s
+ *
+ * CRITICAL: ZUPT should ONLY trigger when bar is COMPLETELY STILL (between reps)
+ * NOT during lockout phase (bar is slowing down but not stopped)
  */
 export const DEFAULT_ZUPT_PARAMS: ZuptParams = {
-  a_thr: 0.5,       // 500 mm/s² - realistic for consumer IMU
-  w_thr: 0.4,       // 400 mrad/s - about 23 deg/s
-  minHoldMs: 200    // 4 samples at 20 Hz
+  a_thr: 0.15,      // 150 mm/s² - tight threshold for true stillness
+  w_thr: 0.15,      // 150 mrad/s - about 8.6 deg/s
+  minHoldMs: 400    // 8 samples at 20 Hz - must be still for longer
 };
 
 /**

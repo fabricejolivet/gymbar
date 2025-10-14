@@ -29,6 +29,7 @@ import { ZuptDetector, DEFAULT_ZUPT_PARAMS, type ZuptParams } from '../core/math
 import { type ConstraintConfig } from '../core/math/constraints';
 import { useStreamStore } from './streamStore';
 import { updateEKFParams, updateZUPTParams, updateConstraintSettings } from '../core/services/preferencesService';
+import { ExponentialMovingAverage } from '../core/math/filters';
 
 interface EKFStoreState {
   // State and parameters
@@ -58,6 +59,7 @@ interface EKFStoreState {
 
   // Internal
   zuptDetector: ZuptDetector;
+  velocityFilterZ: ExponentialMovingAverage;
   isLoadingPreferences: boolean;
 
   // Actions
@@ -101,6 +103,7 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
   initMechanization(3.5);
 
   const zuptDetector = new ZuptDetector(DEFAULT_ZUPT_PARAMS);
+  const velocityFilterZ = new ExponentialMovingAverage(0.3); // Smooth vertical velocity
 
   return {
     // State and parameters
@@ -127,12 +130,14 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
 
     // Internal
     zuptDetector,
+    velocityFilterZ,
     isLoadingPreferences: false,
 
     reset: () => {
       resetMechanization();
       useStreamStore.getState().clearBuffer();
       get().zuptDetector.reset();
+      get().velocityFilterZ.reset();
 
       set({
         state: createStateWithGetters(ekfInit()),
@@ -266,8 +271,10 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
       // EKF Prediction
       let newState = ekfPredict(state, dt, a_enu, ekfParams);
 
-      // NOTE: Velocity filtering removed - EKF process noise provides smoothing
-      // Post-filter was causing instability when combined with forced ZUPT resets
+      // Apply lightweight velocity smoothing (EMA on vertical velocity only)
+      // This reduces jitter for rep detection while preserving responsiveness
+      const velocityFilterZ = get().velocityFilterZ;
+      newState.x[5] = velocityFilterZ.filter(newState.x[5]); // Smooth vZ only
 
       // ZUPT Detection and Update
       const buffer = streamStore.getBuffer();
@@ -283,20 +290,21 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
 
         newState = ekfZuptUpdate(newState, ekfParams);
 
-        // CRITICAL FIX: Force velocity to exactly zero during ZUPT
-        // The Kalman update may leave residual velocity due to filter lag.
-        // Enforcing zero prevents drift.
+        // IMPROVED: Force velocity to near-zero but NOT completely zero
+        // Complete zeroing breaks velocity-based rep detection
+        // Keep small residual for rep detector to work
+        const RESIDUAL_VELOCITY = 0.001; // 1 mm/s
         newState.x[3] = 0;
         newState.x[4] = 0;
-        newState.x[5] = 0;
+        newState.x[5] = RESIDUAL_VELOCITY; // Keep tiny upward velocity
 
-        // CRITICAL: Also zero velocity covariance to prevent drift
-        // Indices 3,4,5 are velocity components in the 9x9 covariance matrix
+        // Reset velocity covariance to small values (NOT zero)
+        const VEL_COVAR_RESET = ekfParams.Rv;
         for (let i = 3; i < 6; i++) {
-          for (let j = 0; j < 9; j++) {
-            newState.P[i * 9 + j] = 0;
-            newState.P[j * 9 + i] = 0;
+          for (let j = 3; j < 6; j++) {
+            newState.P[i * 9 + j] = (i === j) ? VEL_COVAR_RESET : 0;
           }
+          // Keep cross-correlations with position
         }
 
         const vAfter = Math.sqrt(
@@ -335,11 +343,47 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         }
       }
 
-      // Position clipping (safety bounds)
+      // Sanity checks for realistic motion
+      // Reject impossible velocities (barbell can't move > 3 m/s)
+      const MAX_VELOCITY = 3.0; // m/s
+      const velocityMag = Math.sqrt(
+        newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
+      );
+      if (velocityMag > MAX_VELOCITY) {
+        // Scale velocity back to max
+        const scale = MAX_VELOCITY / velocityMag;
+        newState.x[3] *= scale;
+        newState.x[4] *= scale;
+        newState.x[5] *= scale;
+      }
+
+      // Floor constraint: position Z cannot go below floor level
+      // Assume floor is at Z = -0.05m (5cm tolerance for initial offset)
+      const FLOOR_LEVEL = -0.05;
+      if (newState.x[2] < FLOOR_LEVEL) {
+        newState.x[2] = FLOOR_LEVEL;
+        // Also zero downward velocity
+        if (newState.x[5] < 0) {
+          newState.x[5] = 0;
+        }
+      }
+
+      // Position clipping (safety bounds for lateral drift)
       const MAX_POS = 2.5;
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 2; i++) { // Only clip X and Y, not Z
         if (Math.abs(newState.x[i]) > MAX_POS) {
           newState.x[i] = Math.sign(newState.x[i]) * MAX_POS;
+          // Zero lateral velocity if hit bounds
+          newState.x[i + 3] = 0;
+        }
+      }
+
+      // Z position upper bound (bar can't go higher than 3m above start)
+      const MAX_HEIGHT = 3.0;
+      if (newState.x[2] > MAX_HEIGHT) {
+        newState.x[2] = MAX_HEIGHT;
+        if (newState.x[5] > 0) {
+          newState.x[5] = 0;
         }
       }
 

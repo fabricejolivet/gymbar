@@ -53,3 +53,49 @@ export class ButterworthLowPassFilter {
     this.x1 = this.x2 = this.y1 = this.y2 = 0;
   }
 }
+
+/**
+ * Exponential Moving Average Filter
+ *
+ * Simple and effective for smoothing velocity estimates.
+ * Lower alpha = more smoothing, higher lag
+ * Higher alpha = less smoothing, more responsive
+ *
+ * For 20Hz sampling:
+ * - alpha = 0.3 gives ~3-4 sample smoothing window
+ * - alpha = 0.5 gives ~2 sample smoothing window
+ */
+export class ExponentialMovingAverage {
+  private value: number | null = null;
+  private alpha: number;
+
+  constructor(alpha: number = 0.3) {
+    if (alpha <= 0 || alpha > 1) {
+      throw new Error('alpha must be in range (0, 1]');
+    }
+    this.alpha = alpha;
+  }
+
+  filter(x: number): number {
+    if (!isFinite(x)) return this.value ?? 0;
+
+    if (this.value === null) {
+      this.value = x;
+      return x;
+    }
+
+    this.value = this.alpha * x + (1 - this.alpha) * this.value;
+    return this.value;
+  }
+
+  reset() {
+    this.value = null;
+  }
+
+  setAlpha(alpha: number) {
+    if (alpha <= 0 || alpha > 1) {
+      throw new Error('alpha must be in range (0, 1]');
+    }
+    this.alpha = alpha;
+  }
+}
