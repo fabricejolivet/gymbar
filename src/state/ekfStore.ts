@@ -96,11 +96,13 @@ function createStateWithGetters(ekfState: EkfState): EkfState & {
 
 export const useEKFStore = create<EKFStoreState>((set, get) => {
   /**
-   * Fixed parameters optimized for 20Hz IMU sampling:
-   * - Mechanization cutoff: 3.5Hz removes high-frequency noise while preserving barbell dynamics
-   * - No post-EKF velocity filtering: EKF process noise provides sufficient smoothing
+   * Optimized for 20Hz IMU sampling:
+   * - NO pre-filtering: Raw acceleration fed to EKF
+   * - EKF process noise provides smoothing
+   * - Velocity EMA filter (α=0.3) for rep detection stability
+   * - Realistic motion constraints enforce physics
    */
-  initMechanization(3.5);
+  initMechanization(); // No-op now
 
   const zuptDetector = new ZuptDetector(DEFAULT_ZUPT_PARAMS);
   const velocityFilterZ = new ExponentialMovingAverage(0.3); // Smooth vertical velocity
@@ -345,47 +347,86 @@ export const useEKFStore = create<EKFStoreState>((set, get) => {
         }
       }
 
-      // Sanity checks for realistic motion
-      // Reject impossible velocities (barbell can't move > 3 m/s)
-      const MAX_VELOCITY = 3.0; // m/s
+      // ===== REALISTIC BODY MOTION CONSTRAINTS =====
+
+      // 1. Velocity limits based on barbell biomechanics
+      const MAX_VELOCITY = 3.0; // m/s (Olympic lifts ~2.5 m/s max)
+      const MAX_VERTICAL_VEL = 2.5; // m/s (realistic squat/press)
+      const MAX_LATERAL_VEL = 0.5; // m/s (minimal lateral movement)
+
       const velocityMag = Math.sqrt(
         newState.x[3] ** 2 + newState.x[4] ** 2 + newState.x[5] ** 2
       );
+
       if (velocityMag > MAX_VELOCITY) {
-        // Scale velocity back to max
         const scale = MAX_VELOCITY / velocityMag;
         newState.x[3] *= scale;
         newState.x[4] *= scale;
         newState.x[5] *= scale;
       }
 
-      // Floor constraint: position Z cannot go below floor level
-      // Assume floor is at Z = -0.05m (5cm tolerance for initial offset)
-      const FLOOR_LEVEL = -0.05;
+      // Clip vertical velocity separately
+      if (Math.abs(newState.x[5]) > MAX_VERTICAL_VEL) {
+        newState.x[5] = Math.sign(newState.x[5]) * MAX_VERTICAL_VEL;
+      }
+
+      // Clip lateral velocities (barbell moves mostly vertical)
+      for (let i = 3; i < 5; i++) {
+        if (Math.abs(newState.x[i]) > MAX_LATERAL_VEL) {
+          newState.x[i] = Math.sign(newState.x[i]) * MAX_LATERAL_VEL;
+        }
+      }
+
+      // 2. Acceleration limits (detect sensor errors)
+      const MAX_ACCEL = 5.0; // m/s² (human movement typically < 3g)
+      const accelMagENU = Math.sqrt(a_enu[0]**2 + a_enu[1]**2 + a_enu[2]**2);
+      if (accelMagENU > MAX_ACCEL) {
+        // Reject this sample - likely sensor glitch
+        console.warn('[ESKF] Rejecting sample - accel too high:', accelMagENU.toFixed(2));
+        return;
+      }
+
+      // 3. Floor constraint with auto-calibration
+      // Track minimum Z position to find floor level
+      const minZ = get().state.x[2];
+      const currentFloor = Math.min(minZ, newState.x[2]) - 0.1; // 10cm below lowest point
+      const FLOOR_LEVEL = Math.max(currentFloor, -0.2); // Never below -20cm
+
       if (newState.x[2] < FLOOR_LEVEL) {
         newState.x[2] = FLOOR_LEVEL;
-        // Also zero downward velocity
         if (newState.x[5] < 0) {
-          newState.x[5] = 0;
+          newState.x[5] = 0; // Stop downward movement at floor
         }
       }
 
-      // Position clipping (safety bounds for lateral drift)
-      const MAX_POS = 2.5;
-      for (let i = 0; i < 2; i++) { // Only clip X and Y, not Z
-        if (Math.abs(newState.x[i]) > MAX_POS) {
-          newState.x[i] = Math.sign(newState.x[i]) * MAX_POS;
-          // Zero lateral velocity if hit bounds
-          newState.x[i + 3] = 0;
-        }
-      }
-
-      // Z position upper bound (bar can't go higher than 3m above start)
-      const MAX_HEIGHT = 3.0;
+      // 4. Height limit (realistic range)
+      const MAX_HEIGHT = 3.0; // 3m above start
       if (newState.x[2] > MAX_HEIGHT) {
         newState.x[2] = MAX_HEIGHT;
         if (newState.x[5] > 0) {
           newState.x[5] = 0;
+        }
+      }
+
+      // 5. Lateral drift bounds (constrain to training area)
+      const MAX_LATERAL_POS = 2.0; // 2m side-to-side
+      for (let i = 0; i < 2; i++) {
+        if (Math.abs(newState.x[i]) > MAX_LATERAL_POS) {
+          newState.x[i] = Math.sign(newState.x[i]) * MAX_LATERAL_POS;
+          newState.x[i + 3] = 0; // Zero lateral velocity
+        }
+      }
+
+      // 6. Position consistency check (detect drift)
+      // If position changes too much in one timestep, it's likely drift
+      const MAX_POS_CHANGE = dt * MAX_VELOCITY * 2; // 2x safety margin
+      for (let i = 0; i < 3; i++) {
+        const posChange = Math.abs(newState.x[i] - state.x[i]);
+        if (posChange > MAX_POS_CHANGE) {
+          console.warn(`[ESKF] Large position jump detected on axis ${i}: ${(posChange*100).toFixed(1)}cm`);
+          // Limit the change
+          const maxChange = Math.sign(newState.x[i] - state.x[i]) * MAX_POS_CHANGE;
+          newState.x[i] = state.x[i] + maxChange;
         }
       }
 

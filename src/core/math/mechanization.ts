@@ -6,8 +6,9 @@
  * - Groves: "Principles of GNSS, Inertial, and Multisensor Integrated Navigation Systems" (coordinate transforms)
  *
  * This module converts body-frame IMU measurements to ENU (East-North-Up) frame
- * using Euler angles from the WT9011 sensor, removes gravity, and applies low-pass
- * filtering appropriate for 20 Hz sampling rate to prevent aliasing.
+ * using Euler angles from the WT9011 sensor and removes gravity.
+ *
+ * NO FILTERING - EKF process noise provides sufficient smoothing
  *
  * Frame conventions:
  * - Body frame: X-forward, Y-left, Z-up (sensor mounting)
@@ -23,88 +24,10 @@ export type Imu20 = {
 };
 
 /**
- * 2nd-order Butterworth low-pass filter state
+ * Initialize mechanization (no-op now, kept for compatibility)
  */
-interface ButterworthState {
-  x1: [number, number, number];
-  x2: [number, number, number];
-  y1: [number, number, number];
-  y2: [number, number, number];
-}
-
-/**
- * Low-pass filter for acceleration data
- * 2nd-order Butterworth with cutoff appropriate for 20 Hz sampling
- */
-class LowPassFilter {
-  private state: ButterworthState;
-  private a0: number;
-  private a1: number;
-  private a2: number;
-  private b1: number;
-  private b2: number;
-
-  constructor(cutoffHz: number, sampleHz: number) {
-    // Butterworth coefficients for 2nd order low-pass
-    const wc = 2 * Math.PI * cutoffHz;
-    const T = 1 / sampleHz;
-    const wc2 = wc * wc;
-    const wc_sqrt2 = wc * Math.SQRT2;
-
-    const k = wc2 * T * T;
-    const k1 = wc_sqrt2 * T;
-    const denom = 4 + 2 * k1 + k;
-
-    this.a0 = k / denom;
-    this.a1 = 2 * k / denom;
-    this.a2 = k / denom;
-    this.b1 = (2 * k - 8) / denom;
-    this.b2 = (4 - 2 * k1 + k) / denom;
-
-    this.state = {
-      x1: [0, 0, 0],
-      x2: [0, 0, 0],
-      y1: [0, 0, 0],
-      y2: [0, 0, 0]
-    };
-  }
-
-  filter(input: [number, number, number]): [number, number, number] {
-    const output: [number, number, number] = [0, 0, 0];
-
-    for (let i = 0; i < 3; i++) {
-      output[i] = this.a0 * input[i] +
-                  this.a1 * this.state.x1[i] +
-                  this.a2 * this.state.x2[i] -
-                  this.b1 * this.state.y1[i] -
-                  this.b2 * this.state.y2[i];
-
-      this.state.x2[i] = this.state.x1[i];
-      this.state.x1[i] = input[i];
-      this.state.y2[i] = this.state.y1[i];
-      this.state.y1[i] = output[i];
-    }
-
-    return output;
-  }
-
-  reset(): void {
-    this.state = {
-      x1: [0, 0, 0],
-      x2: [0, 0, 0],
-      y1: [0, 0, 0],
-      y2: [0, 0, 0]
-    };
-  }
-}
-
-let accelFilter: LowPassFilter | null = null;
-
-/**
- * Initialize the low-pass filter with specified cutoff frequency
- */
-export function initMechanization(cutoffHz: number = 3.5): void {
-  accelFilter = new LowPassFilter(cutoffHz, 20);
+export function initMechanization(cutoffHz?: number): void {
+  // No longer needed - filtering removed
 }
 
 /**
@@ -143,24 +66,17 @@ function rotateVector(R: number[][], v: [number, number, number]): [number, numb
 }
 
 /**
- * Convert body-frame acceleration to ENU frame, remove gravity, and apply low-pass filter
+ * Convert body-frame acceleration to ENU frame and remove gravity
  *
  * Process:
  * 1. Rotate body acceleration to ENU frame using Euler angles
  * 2. Remove gravity vector [0, 0, -g] in ENU
- * 3. Apply 2nd-order Butterworth low-pass filter (cutoff ~3.5 Hz for 20 Hz sample rate)
- *
- * The low-pass filter prevents aliasing and removes high-frequency noise while preserving
- * the motion dynamics typical of barbell movements (~0.5-2 Hz fundamental).
+ * 3. NO FILTERING - Raw acceleration fed to EKF, process noise handles smoothing
  *
  * @param s IMU sample with body accel (includes gravity), gyro, and Euler angles
- * @returns ENU acceleration [m/s²] with gravity removed and filtered
+ * @returns ENU acceleration [m/s²] with gravity removed (NO filtering)
  */
 export function bodyToEnuAccelEuler(s: Imu20): [number, number, number] {
-  if (!accelFilter) {
-    initMechanization();
-  }
-
   // Check for gimbal lock condition (pitch near ±90°)
   const pitch = s.euler_rad[1];
   if (Math.abs(pitch) > 1.48) { // ~85 degrees
@@ -186,20 +102,14 @@ export function bodyToEnuAccelEuler(s: Imu20): [number, number, number] {
     a_enu_with_gravity[2] - GRAVITY
   ];
 
-  // Apply low-pass filter to remove high-frequency noise
-  const a_enu_filtered = accelFilter!.filter(a_enu_no_gravity);
-
-  return a_enu_filtered;
+  return a_enu_no_gravity;
 }
 
 /**
- * Reset mechanization filter state
- * Call this when starting a new session or after a discontinuity
+ * Reset mechanization state (no-op now, kept for compatibility)
  */
 export function resetMechanization(): void {
-  if (accelFilter) {
-    accelFilter.reset();
-  }
+  // No longer needed - no filter state
 }
 
 /**
