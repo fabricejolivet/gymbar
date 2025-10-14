@@ -34,13 +34,17 @@ export interface ZuptParams {
  * Default ZUPT parameters tuned for 20 Hz sampling
  *
  * These values are based on:
- * - Typical sensor noise levels for MEMS IMUs
+ * - Typical sensor noise levels for consumer MEMS IMUs
  * - OpenShoe recommended starting points
  * - Empirical tuning for barbell movement dynamics
+ *
+ * NOTE: Consumer-grade IMUs have higher noise than industrial sensors:
+ * - Accel noise: ~0.15-0.5 m/s² typical
+ * - Gyro noise: ~0.1-0.3 rad/s typical
  */
 export const DEFAULT_ZUPT_PARAMS: ZuptParams = {
-  a_thr: 0.06,      // 60 mm/s² - about 6 mg
-  w_thr: 0.06,      // 60 mrad/s - about 3.4 deg/s
+  a_thr: 0.5,       // 500 mm/s² - realistic for consumer IMU
+  w_thr: 0.4,       // 400 mrad/s - about 23 deg/s
   minHoldMs: 200    // 4 samples at 20 Hz
 };
 

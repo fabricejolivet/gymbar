@@ -6,7 +6,7 @@ import { useTrainingStore } from '../../state/trainingStore';
 import { useSessionStore } from '../../state/sessionStore';
 import { useEKFStore } from '../../state/ekfStore';
 import { dataRouter } from '../../state/dataRouter';
-import { BarbellRepDetector } from '../../core/reps/barbell';
+import { SimpleVerticalRepDetector } from '../../core/reps/simpleVerticalDetector';
 import { loadUserPreferences } from '../../core/services/preferencesService';
 import { DebugDataViewer } from '../../components/debug/DebugDataViewer';
 
@@ -39,7 +39,7 @@ export function LiveTrainingPage() {
   const [barPath, setBarPath] = useState<Array<{ x: number; y: number }>>([]);
   const [tiltPath, setTiltPath] = useState<Array<{ x: number; y: number }>>([]);
 
-  const repDetectorRef = useRef(new BarbellRepDetector());
+  const repDetectorRef = useRef(new SimpleVerticalRepDetector());
   const startTimeRef = useRef(Date.now());
   const lastEulerRef = useRef<[number, number, number]>([0, 0, 0]);
   const lastUIUpdateRef = useRef(0);
@@ -51,6 +51,16 @@ export function LiveTrainingPage() {
       if (prefs.rep_counter_config) {
         repDetectorRef.current.setConfig(prefs.rep_counter_config);
       }
+    });
+
+    // CRITICAL: Set callback to reset all filters when rep completes
+    repDetectorRef.current.setOnRepComplete(() => {
+      console.log('[LiveTraining] 🔄 Rep completed - resetting EKF and filters');
+      resetEKF();
+      setBarPath([]);
+      setTiltPath([]);
+      setBalanceHistory([]);
+      setSpeedHistory([]);
     });
 
     repDetectorRef.current.reset();
@@ -164,18 +174,17 @@ export function LiveTrainingPage() {
     });
 
     const rep = repDetectorRef.current.update(
-      position_cm[2],
-      velocity_cms[2],
-      position_cm[1],
-      velocity_cms[1],
-      adjustedTilt,
-      targetTilt,
-      now
+      position_cm[2],      // verticalPos_cm
+      velocity_cms[2],     // verticalVel_cms
+      adjustedTilt,        // tilt_deg
+      targetTilt,          // targetTilt_deg
+      now                  // time_ms
     );
 
     if (rep) {
-      console.log('[LiveTraining] Rep detected:', rep);
+      console.log('[LiveTraining] ✅ Rep detected:', rep);
       addRep(rep);
+      // Note: Filter reset happens automatically via onRepComplete callback
     }
   }, [ekfState, initStatus, sensorFlipped, targetTilt, addRep]);
 
