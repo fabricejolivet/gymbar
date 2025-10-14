@@ -24,10 +24,19 @@ export function RepCounterTuning({ config, onChange }: RepCounterTuningProps) {
 
   useEffect(() => {
     repDetectorRef.current.setConfig(config);
+
+    // CRITICAL: Set callback to reset EKF when rep completes
+    repDetectorRef.current.setOnRepComplete(() => {
+      console.log('[RepCounterTuning] 🔄 Rep completed - resetting EKF');
+      const resetEKF = useEKFStore.getState().reset;
+      resetEKF();
+    });
   }, [config]);
 
   const handleReset = () => {
     repDetectorRef.current.reset();
+    const resetEKF = useEKFStore.getState().reset;
+    resetEKF();
     setRepCount(0);
     setCurrentPhase('waiting');
     setCurrentROM(0);
